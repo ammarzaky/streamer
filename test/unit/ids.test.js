@@ -1,0 +1,2 @@
+import test from 'node:test'; import assert from 'node:assert/strict'; import { configureIds, newHostToken, newPeerId, newRoomId } from '../../src/signaling/ids.js';
+test('ids are crypto-sized, URL safe, and unique', () => { configureIds({ rooms: { roomIdBytes: 12, hostTokenBytes: 24 } }); const rooms = new Set(Array.from({ length: 1000 }, () => newRoomId())); assert.equal(rooms.size, 1000); assert.match([...rooms][0], /^[\w-]{16}$/); assert.match(newPeerId(), /^[\w-]+$/); assert.equal(Buffer.from(newHostToken(), 'base64url').length, 24); });

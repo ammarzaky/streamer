@@ -1,0 +1,1 @@
+export function startJanitor({ registry, config, endRoom }) { const timer = setInterval(() => registry.sweep({ endRoom }), config.rooms.janitorIntervalMs); timer.unref?.(); return () => clearInterval(timer); }

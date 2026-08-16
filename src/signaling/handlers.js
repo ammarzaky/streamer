@@ -1,0 +1,50 @@
+import { WebSocket } from 'ws';
+import { C2S, CLAIM_OUTCOME, CLOSE, END_REASON, ERRORS, LEAVE_REASON, REVOKE_REASON, S2C, canTimeoutGrant, isReleaseAuthorized, resolveClaim } from '../../public/shared/protocol.js';
+
+function error(ctx, code, message, data = {}) { ctx.send(ctx.socket, S2C.ERROR, { code, message, data }, ctx.message.id); }
+function shareData(room) { const peer = room.peers.get(room.currentSharer); return peer ? { sharerId: peer.id, sharerName: peer.name, epoch: room.shareEpoch } : { sharerId: null, epoch: room.shareEpoch }; }
+function grant(room, peer, ctx) { room.currentSharer = peer.id; room.pendingClaim = null; room.shareEpoch++; ctx.broadcast(room, S2C.SHARE_STATE, shareData(room)); }
+
+function createRoom(ctx, message) {
+  const room = ctx.registry.create(); if (!room) return error(ctx, ERRORS.ROOM_LIMIT, 'Room limit reached');
+  const peer = room.addPeer(message.data.name, ctx.socket); room.hostPeerId = peer.id;
+  ctx.attach(room, peer); ctx.send(ctx.socket, S2C.ROOM_CREATED, { roomId: room.id, selfId: peer.id, joinOrder: peer.joinOrder, hostToken: room.hostToken }, message.id);
+}
+function join(ctx, message) {
+  const room = ctx.registry.get(message.data.roomId); if (!room || room.endedAt) return error(ctx, ERRORS.ROOM_NOT_FOUND, 'Room not found');
+  const required = ctx.config.rooms.accessCode;
+  if (required && message.data.accessCode === undefined) return error(ctx, ERRORS.ACCESS_CODE_REQUIRED, 'Access code required');
+  if (required && message.data.accessCode !== required) return error(ctx, ERRORS.ACCESS_CODE_INVALID, 'Invalid access code');
+  room.evictDead((dead) => ctx.registry.removePeer(room, dead, { broadcast: ctx.broadcast, send: ctx.send }));
+  const now = Date.now(); ctx.registry.expireHostGrace(room, ctx, now);
+  if (room.peers.size >= ctx.config.rooms.maxParticipants) return error(ctx, ERRORS.ROOM_FULL, 'Room is full');
+  const existing = [...room.peers.values()]; const peer = room.addPeer(message.data.name, ctx.socket, now);
+  let reclaimed = false;
+  if (!room.hostPeerId && room.hostGraceUntil !== null && now < room.hostGraceUntil && message.data.hostToken === room.hostToken) { room.hostPeerId = peer.id; room.hostGraceUntil = null; reclaimed = true; }
+  else if (!room.hostPeerId && room.hostGraceUntil !== null && now >= room.hostGraceUntil) ctx.registry.promote(room, ctx);
+  ctx.attach(room, peer);
+  ctx.send(ctx.socket, S2C.JOINED, { roomId: room.id, selfId: peer.id, isHost: room.hostPeerId === peer.id, hostPeerId: room.hostPeerId, maxParticipants: ctx.config.rooms.maxParticipants, share: shareData(room), participants: existing.map((p) => room.participant(p, peer)) }, message.id);
+  ctx.broadcast(room, S2C.PEER_JOINED, { peer: null }, { except: peer.id, perPeer: (recipient) => ({ peer: room.participant(peer, recipient) }) });
+  if (reclaimed) ctx.broadcast(room, S2C.HOST_CHANGED, { hostPeerId: peer.id, reason: 'reclaimed' });
+}
+function leave(ctx) { ctx.registry.removePeer(ctx.room, ctx.peer, { reason: LEAVE_REASON.LEFT, intentional: true, send: ctx.send, broadcast: ctx.broadcast }); ctx.socket.close(CLOSE.LEFT); }
+function end(ctx) { if (ctx.room.hostPeerId !== ctx.peer.id) return error(ctx, ERRORS.NOT_HOST, 'Only the host can end the room'); ctx.endRoom(ctx.room, END_REASON.HOST_ENDED); }
+function mute(ctx, message) { ctx.peer.micMuted = message.data.micMuted; ctx.broadcast(ctx.room, S2C.PEER_MUTE_STATE, { peerId: ctx.peer.id, micMuted: ctx.peer.micMuted }, { except: ctx.peer.id }); }
+function relay(ctx, message) { const target = ctx.room.peers.get(message.data.to); if (!target || target.socket.readyState !== WebSocket.OPEN) return error(ctx, ERRORS.PEER_NOT_FOUND, 'Peer not found'); const data = { ...message.data, from: ctx.peer.id }; delete data.to; const type = message.type === C2S.OFFER ? S2C.OFFER : message.type === C2S.ANSWER ? S2C.ANSWER : S2C.ICE_CANDIDATE; ctx.send(target.socket, type, data); }
+function claim(ctx, message) {
+  const result = resolveClaim({ claimantId: ctx.peer.id, force: message.data.force }, ctx.room);
+  if (result.outcome === CLAIM_OUTCOME.NOOP) return;
+  if (result.outcome === CLAIM_OUTCOME.REJECT) return error(ctx, result.code, 'Another participant is sharing');
+  if (result.outcome === CLAIM_OUTCOME.GRANT) return grant(ctx.room, ctx.peer, ctx);
+  const pending = { claimantId: ctx.peer.id, revokedId: result.revokedId }; ctx.room.pendingClaim = pending;
+  const revoked = ctx.room.peers.get(result.revokedId); if (revoked) ctx.send(revoked.socket, S2C.SHARE_REVOKED, { byPeerId: ctx.peer.id, byName: ctx.peer.name, reason: REVOKE_REASON.TAKEOVER, epoch: ctx.room.shareEpoch });
+  pending.timer = setTimeout(() => { if (ctx.room.pendingClaim !== pending) return; if (canTimeoutGrant(ctx.room, pending)) { const claimant = ctx.room.peers.get(pending.claimantId); if (claimant) grant(ctx.room, claimant, ctx); } else ctx.room.pendingClaim = null; }, ctx.config.rooms.shareRevokeTimeoutMs);
+  pending.timer.unref?.();
+}
+function release(ctx, message) {
+  if (!isReleaseAuthorized({ senderId: ctx.peer.id, currentSharerId: ctx.room.currentSharer, epoch: message.data.epoch, currentEpoch: ctx.room.shareEpoch })) return;
+  const pending = ctx.room.pendingClaim; if (pending?.revokedId === ctx.peer.id) { clearTimeout(pending.timer); const claimant = ctx.room.peers.get(pending.claimantId); if (claimant) return grant(ctx.room, claimant, ctx); ctx.room.pendingClaim = null; }
+  ctx.room.currentSharer = null; ctx.room.shareEpoch++; ctx.broadcast(ctx.room, S2C.SHARE_STATE, shareData(ctx.room));
+}
+
+export const handlers = Object.freeze({ [C2S.CREATE_ROOM]: createRoom, [C2S.JOIN]: join, [C2S.LEAVE]: leave, [C2S.END]: end, [C2S.MUTE_STATE]: mute, [C2S.CLAIM_SHARE]: claim, [C2S.RELEASE_SHARE]: release, [C2S.OFFER]: relay, [C2S.ANSWER]: relay, [C2S.ICE_CANDIDATE]: relay, [C2S.PING]: (ctx, message) => ctx.send(ctx.socket, S2C.PONG, {}, message.id) });

@@ -1,0 +1,2 @@
+import test from 'node:test'; import assert from 'node:assert/strict'; import { TokenBucket } from '../../src/signaling/rateLimit.js';
+test('token bucket refills without exceeding capacity', () => { const b = new TokenBucket({ capacity: 2, refillPerSec: 1 }, 0); assert.equal(b.take(0), true); assert.equal(b.take(0), true); assert.equal(b.take(0), false); assert.equal(b.take(1000), true); assert.equal(b.take(1000), false); });
