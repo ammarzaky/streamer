@@ -210,6 +210,15 @@ export function createSignalingClient({ onMessage, onStatus }) {
       return socket?.readyState === WebSocket.OPEN;
     },
 
+    /**
+     * Drop the socket WITHOUT marking the session as over, so the reconnect ladder runs.
+     * Used only by the E2E harness: a page cannot produce a genuine 1006 for itself, and this
+     * travels the identical branch.
+     */
+    forceDrop(code = CLOSE.SERVER_SHUTDOWN) {
+      if (socket?.readyState === WebSocket.OPEN) socket.close(code);
+    },
+
     /** Close deliberately: no reconnect, no terminal-error UI. */
     close(code = CLOSE.NORMAL) {
       intentionalClose = true;

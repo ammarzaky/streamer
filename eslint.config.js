@@ -50,6 +50,13 @@ export default [
     languageOptions: { globals: globals.node },
   },
 
+  // Playwright specs run in Node but pass closures into the browser via page.evaluate, so
+  // they legitimately reference both sets of globals.
+  {
+    files: ['test/e2e/**/*.js'],
+    languageOptions: { globals: { ...globals.node, ...globals.browser } },
+  },
+
   // Shared code runs in BOTH runtimes, so it gets no globals at all. Reaching for `window`
   // or `process` here is a lint error by construction.
   //

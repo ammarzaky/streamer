@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Streamer — private screen sharing</title>
+    <meta name="description" content="Private peer-to-peer screen sharing for a small group." />
+    <!-- The room id is the access credential, so it must never travel in a Referer header. -->
+    <meta name="referrer" content="no-referrer" />
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/css/tokens.css" />
+    <link rel="stylesheet" href="/css/base.css" />
+    <link rel="stylesheet" href="/css/layout.css" />
+    <link rel="stylesheet" href="/css/components.css" />
+  </head>
+
+  <body>
+    <div class="landing">
+      <header class="topbar">
+        <span class="topbar__brand">
+          <svg class="btn__icon" aria-hidden="true" focusable="false">
+            <use href="/assets/icons.svg#screen"></use>
+          </svg>
+          Streamer
+        </span>
+      </header>
+
+      <main class="landing__main">
+        <div class="landing__card">
+          <div class="landing__hero">
+            <h1 class="landing__title">Share your screen, privately</h1>
+            <p class="landing__subtitle">
+              Video and audio go straight between browsers. This server only introduces you to
+              each other — it never sees or stores your screen, your voice, or anything else.
+            </p>
+          </div>
+
+          <!-- A banner slot for the insecure-context case, which must be visible before any
+               button is pressed: over http:// the capture APIs do not exist at all. -->
+          <div id="env-banner" hidden></div>
+
+          <div class="landing__actions">
+            <button id="create" class="btn btn--primary btn--lg btn--block" type="button">
+              <svg class="btn__icon" aria-hidden="true" focusable="false">
+                <use href="/assets/icons.svg#plus"></use>
+              </svg>
+              Create a room
+            </button>
+
+            <div class="landing__divider">or join an existing one</div>
+
+            <form id="join-form" class="landing__join" novalidate>
+              <div class="field">
+                <label class="sr-only" for="join-link">Room link</label>
+                <input
+                  id="join-link"
+                  class="input"
+                  type="text"
+                  inputmode="url"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="Paste a room link"
+                />
+              </div>
+              <button class="btn btn--secondary" type="submit">Join</button>
+            </form>
+            <p id="join-error" class="field__error" hidden></p>
+          </div>
+        </div>
+      </main>
+
+      <footer class="landing__foot">
+        No accounts, no recording, nothing stored.
+      </footer>
+    </div>
+
+    <script type="module" src="/js/main-landing.js"></script>
+  </body>
+</html>

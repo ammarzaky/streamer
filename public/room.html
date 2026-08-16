@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Room — Streamer</title>
+    <!-- The room id is the access credential, so it must never travel in a Referer header. -->
+    <meta name="referrer" content="no-referrer" />
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/css/tokens.css" />
+    <link rel="stylesheet" href="/css/base.css" />
+    <link rel="stylesheet" href="/css/layout.css" />
+    <link rel="stylesheet" href="/css/components.css" />
+    <link rel="modulepreload" href="/js/main-room.js" />
+    <link rel="modulepreload" href="/shared/protocol.js" />
+  </head>
+
+  <body>
+    <!-- ================= Lobby: name + mic, before joining ================= -->
+    <div id="lobby" class="lobby">
+      <div class="lobby__card">
+        <div class="lobby__head">
+          <h1 id="lobby-title">Join the room</h1>
+          <p id="lobby-sub" class="field__hint">
+            Your microphone starts muted. Nothing is recorded.
+          </p>
+        </div>
+
+        <div id="lobby-banner" hidden></div>
+
+        <form id="lobby-form" class="lobby__fields" novalidate>
+          <div class="field">
+            <label class="field__label" for="name">Your name</label>
+            <input
+              id="name"
+              class="input"
+              type="text"
+              maxlength="32"
+              autocomplete="nickname"
+              placeholder="How others will see you"
+              required
+            />
+            <p id="name-error" class="field__error" hidden></p>
+          </div>
+
+          <div class="field" id="access-code-field" hidden>
+            <label class="field__label" for="access-code">Access code</label>
+            <input id="access-code" class="input" type="text" autocomplete="off" />
+          </div>
+
+          <button id="lobby-submit" class="btn btn--primary btn--lg btn--block" type="submit">
+            Join room
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <!-- ========================= Room ========================= -->
+    <div id="room" class="room" hidden>
+      <header class="topbar">
+        <span class="topbar__brand">
+          <svg class="btn__icon" aria-hidden="true" focusable="false">
+            <use href="/assets/icons.svg#screen"></use>
+          </svg>
+          Streamer
+        </span>
+
+        <span id="live-badge" class="badge badge--live" hidden>LIVE</span>
+
+        <span class="topbar__spacer"></span>
+
+        <div class="topbar__meta">
+          <div class="link-box">
+            <span id="share-link" class="link-box__url" data-testid="share-link"></span>
+            <button
+              id="copy-link"
+              class="btn btn--ghost btn--sm"
+              type="button"
+              data-testid="copy-link"
+              aria-label="Copy room link"
+            >
+              <svg class="btn__icon" aria-hidden="true" focusable="false">
+                <use href="/assets/icons.svg#copy"></use>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <!-- Persistent conditions live here; transient events use toasts. -->
+      <div id="room-banner" hidden></div>
+
+      <div class="room__body">
+        <main class="stage" id="stage">
+          <div class="stage__empty" id="stage-empty">
+            <svg
+              width="48"
+              height="48"
+              aria-hidden="true"
+              focusable="false"
+              style="color: var(--text-3)"
+            >
+              <use href="/assets/icons.svg#screen"></use>
+            </svg>
+            <p id="stage-empty-text">No one is sharing a screen yet.</p>
+            <p class="field__hint">Press Share screen below to start.</p>
+          </div>
+
+          <!-- muted: this element carries picture only. Remote audio plays through dedicated
+               <audio> elements so muting a tile can never mute a person. -->
+          <video
+            id="stage-video"
+            class="stage__video"
+            autoplay
+            playsinline
+            muted
+            data-testid="stage-video"
+            hidden
+          ></video>
+
+          <div id="stage-label" class="stage__label" hidden></div>
+        </main>
+
+        <aside class="roster">
+          <div class="roster__head">
+            <span>Participants</span>
+            <span class="badge badge--neutral" id="participant-count" data-testid="participants-count">1</span>
+          </div>
+          <div class="roster__list" id="roster-list"></div>
+          <div class="roster__foot" id="stats-panel" hidden></div>
+        </aside>
+      </div>
+
+      <footer class="controlbar">
+        <button id="mic-toggle" class="ctl" type="button" data-testid="mic-toggle">
+          <svg class="ctl__icon" aria-hidden="true" focusable="false">
+            <use id="mic-icon" href="/assets/icons.svg#mic"></use>
+          </svg>
+          <span id="mic-label">Mute</span>
+        </button>
+
+        <button id="share-toggle" class="ctl" type="button" data-testid="share-toggle">
+          <svg class="ctl__icon" aria-hidden="true" focusable="false">
+            <use id="share-icon" href="/assets/icons.svg#screen"></use>
+          </svg>
+          <span id="share-label">Share screen</span>
+        </button>
+
+        <button id="leave" class="ctl ctl--danger" type="button" data-testid="leave">
+          <svg class="ctl__icon" aria-hidden="true" focusable="false">
+            <use href="/assets/icons.svg#leave"></use>
+          </svg>
+          <span>Leave</span>
+        </button>
+
+        <button id="end-session" class="ctl ctl--danger" type="button" data-testid="end-session" hidden>
+          <svg class="ctl__icon" aria-hidden="true" focusable="false">
+            <use href="/assets/icons.svg#end"></use>
+          </svg>
+          <span>End</span>
+        </button>
+
+        <div class="controlbar__end">
+          <div style="position: relative">
+            <button
+              id="quality-toggle"
+              class="btn btn--secondary btn--sm"
+              type="button"
+              data-testid="quality-toggle"
+              aria-haspopup="true"
+              aria-expanded="false"
+            >
+              <span id="quality-label">1080p 60</span>
+            </button>
+            <div id="quality-menu" class="quality" role="radiogroup" hidden></div>
+          </div>
+
+          <button id="stats-toggle" class="btn btn--ghost btn--sm" type="button" data-testid="stats-toggle">
+            <svg class="btn__icon" aria-hidden="true" focusable="false">
+              <use href="/assets/icons.svg#stats"></use>
+            </svg>
+            Stats
+          </button>
+        </div>
+      </footer>
+    </div>
+
+    <!-- Remote audio elements are appended here, outside the video stage. -->
+    <div id="audio-sinks" aria-hidden="true" style="position: absolute; width: 0; height: 0; overflow: hidden"></div>
+
+    <script type="module" src="/js/main-room.js"></script>
+  </body>
+</html>

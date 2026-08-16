@@ -219,6 +219,10 @@ export const TERMINAL_CLOSE_CODES = Object.freeze([
   CLOSE.KICKED_RATE_LIMIT,
   CLOSE.PROTOCOL_ERROR,
   CLOSE.VERSION_MISMATCH,
+  // 1009 (message too big) is closed by the WebSocket layer before any handler sees the
+  // frame, so the server cannot answer with PAYLOAD_TOO_LARGE. Reconnecting would just
+  // reproduce whatever produced the oversized frame, in a loop.
+  1009,
 ]);
 
 export function shouldReconnect(closeCode) {
@@ -232,6 +236,18 @@ export const LEAVE_REASON = Object.freeze({
   DISCONNECTED: 'disconnected',
   TIMEOUT: 'timeout',
   ROOM_ENDED: 'room-ended',
+});
+
+/**
+ * Why the host changed.
+ *
+ * `reclaimed` means the original host came back within the grace window and proved it with
+ * their token; `promoted` means the grace expired and the longest-present participant took
+ * over. The UI wording differs, and so does what the previous host should expect.
+ */
+export const HOST_CHANGE_REASON = Object.freeze({
+  PROMOTED: 'promoted',
+  RECLAIMED: 'reclaimed',
 });
 
 /** Why a room ended. */

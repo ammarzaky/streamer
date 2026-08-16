@@ -45,6 +45,10 @@ export function validateConfig(config) {
   integer(config, 'server.port', 0, 65535); integer(config, 'server.httpRedirect.port', 0, 65535);
   if (config.server.port === config.server.httpRedirect.port) fail('server.httpRedirect.port', 'must differ from server.port');
   integer(config, 'rooms.roomIdBytes', 12, 1024);
+  // Unguessability is the whole access-control model. A zero here would make newHostToken()
+  // return an empty string, and any joiner sending hostToken:"" would then satisfy the
+  // reclaim check and steal the host role during the grace window.
+  integer(config, 'rooms.hostTokenBytes', 16, 1024);
   integer(config, 'rooms.maxParticipants', 2, 8); integer(config, 'rooms.hardMaxParticipants', 2, 8);
   if (config.rooms.maxParticipants > config.rooms.hardMaxParticipants) fail('rooms.maxParticipants', 'must not exceed rooms.hardMaxParticipants');
   if (!PRESET_IDS.includes(config.media.defaultPreset)) fail('media.defaultPreset', `must be one of ${PRESET_IDS.join(', ')}, got ${config.media.defaultPreset}`);
