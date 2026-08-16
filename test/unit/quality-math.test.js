@@ -12,7 +12,7 @@ import {
   effectiveCapBps,
   bestPresetForBudget,
   scaleResolutionDownBy,
-} from '../../src/shared/quality-math.js';
+} from '../../public/shared/quality-math.js';
 
 test('preset ladder is ordered strictly by ascending bitrate', () => {
   // Auto step-down walks this ladder one rung at a time and relies on each step actually

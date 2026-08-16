@@ -1,0 +1,328 @@
+/* App shells: the landing page, the lobby, and the room's three-region layout. */
+
+/* ===========================================================================
+   Landing
+   =========================================================================== */
+
+.landing {
+  min-height: 100dvh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+}
+
+.landing__main {
+  display: grid;
+  place-items: center;
+  padding: var(--space-6) var(--space-4);
+}
+
+.landing__card {
+  width: 100%;
+  max-width: 480px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.landing__hero {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.landing__title {
+  font-size: var(--text-2xl);
+  letter-spacing: -0.02em;
+}
+
+.landing__subtitle {
+  color: var(--text-2);
+  font-size: var(--text-md);
+}
+
+.landing__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.landing__divider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+.landing__divider::before,
+.landing__divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--line-1);
+}
+
+.landing__join {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.landing__join .field {
+  flex: 1;
+}
+
+.landing__foot {
+  padding: var(--space-4);
+  text-align: center;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+/* ===========================================================================
+   Lobby (pre-join state of room.html)
+   =========================================================================== */
+
+.lobby {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6) var(--space-4);
+}
+
+.lobby__card {
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-6);
+  background: var(--surface-1);
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+}
+
+.lobby__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.lobby__fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* ===========================================================================
+   Room
+   ===========================================================================
+   Three regions: a thin top bar for identity and the share link, a stage that takes all
+   remaining height, and a fixed control bar. The roster is a rail beside the stage on wide
+   screens and collapses beneath it on narrow ones. The stage is the only region allowed to
+   grow, so video never gets squeezed by chrome.
+*/
+
+.room {
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: var(--topbar-h) 1fr var(--controlbar-h);
+  overflow: hidden;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding-inline: var(--space-4);
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--line-1);
+  min-width: 0;
+}
+
+.topbar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+
+.topbar__spacer {
+  flex: 1;
+  min-width: var(--space-2);
+}
+
+.topbar__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.room__body {
+  display: grid;
+  grid-template-columns: 1fr var(--roster-w);
+  min-height: 0; /* lets the stage shrink instead of overflowing the grid row */
+}
+
+.room__body--no-roster {
+  grid-template-columns: 1fr;
+}
+
+/* ---- Stage --------------------------------------------------------------- */
+
+.stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--stage-bg);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.stage__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-6);
+  text-align: center;
+  color: var(--text-2);
+  max-width: 42ch;
+}
+
+/* The shared screen. `contain` keeps the whole window visible: cropping someone's screen to
+   fill the viewport hides exactly the toolbars and edges they are usually pointing at. */
+.stage__video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--stage-bg);
+}
+
+.stage__label {
+  position: absolute;
+  bottom: var(--space-3);
+  left: var(--space-3);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(8px);
+  border-radius: var(--radius-full);
+  font-size: var(--text-sm);
+  pointer-events: none;
+}
+
+.stage__corner {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* ---- Roster rail --------------------------------------------------------- */
+
+.roster {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface-1);
+  border-left: 1px solid var(--line-1);
+}
+
+.roster__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--line-1);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-2);
+}
+
+.roster__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.roster__foot {
+  border-top: 1px solid var(--line-1);
+  padding: var(--space-3);
+}
+
+/* ---- Control bar --------------------------------------------------------- */
+
+.controlbar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding-inline: var(--space-4);
+  background: var(--surface-1);
+  border-top: 1px solid var(--line-1);
+  position: relative;
+}
+
+/* Secondary controls sit at the trailing edge so the primary media controls stay centred
+   and land in the same place regardless of how many extras are present. */
+.controlbar__end {
+  position: absolute;
+  right: var(--space-4);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* ===========================================================================
+   Responsive
+   =========================================================================== */
+
+@media (max-width: 860px) {
+  .room__body {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr auto;
+  }
+
+  .roster {
+    border-left: none;
+    border-top: 1px solid var(--line-1);
+    max-height: 34dvh;
+  }
+
+  .roster__list {
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .controlbar__end {
+    position: static;
+  }
+
+  .controlbar {
+    justify-content: space-between;
+  }
+}
+
+@media (max-width: 560px) {
+  :root {
+    --controlbar-h: 64px;
+  }
+
+  .topbar__meta .link-box {
+    display: none; /* the share link moves into the roster footer on phones */
+  }
+}
