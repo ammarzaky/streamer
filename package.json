@@ -1,0 +1,36 @@
+{
+  "name": "streamer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Private peer-to-peer screen sharing for a small group. Self-hosted signaling, WebRTC media, no storage.",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "certs": "node scripts/make-certs.mjs",
+    "certs:check": "node scripts/make-certs.mjs --check",
+    "links": "node scripts/show-links.mjs",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test:unit": "node --test --test-timeout=20000 --test-reporter=spec \"test/**/*.test.js\"",
+    "test:unit:watch": "node --test --watch --test-reporter=spec \"test/**/*.test.js\"",
+    "test:e2e": "playwright test",
+    "test:e2e:smoke": "playwright test --grep @smoke",
+    "test:e2e:headed": "playwright test --project=e2e-headed --headed",
+    "report": "playwright show-report test-results/html",
+    "verify": "node scripts/verify.mjs",
+    "test": "node scripts/verify.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@playwright/test": "1.62.1",
+    "eslint": "^9.0.0",
+    "globals": "^15.0.0"
+  }
+}
