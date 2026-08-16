@@ -140,6 +140,48 @@ export async function isStillSendingVideo(page, peerId, windowMs = 2500) {
   return after - before > 2000;
 }
 
+/**
+ * Assert the <video> element is really painting frames.
+ *
+ * Distinct from assertLiveVideo, which reads getStats: a peer connection can be decoding
+ * 1080p perfectly while the stage shows black, because attaching the track to the element is
+ * a separate step that can be missed. That exact bug shipped once and every stats-based
+ * assertion passed straight through it.
+ */
+export async function assertVideoElementPlaying(page, testId = 'stage-video') {
+  const video = page.getByTestId(testId);
+  await expect(video).toBeVisible();
+
+  await expect
+    .poll(
+      () =>
+        page.evaluate((id) => {
+          const el = document.querySelector(`[data-testid="${id}"]`);
+          return el?.videoWidth ?? 0;
+        }, testId),
+      { timeout: 20_000, message: 'the video element should report real dimensions' },
+    )
+    .toBeGreaterThan(0);
+
+  const readAt = () =>
+    page.evaluate((id) => {
+      const el = document.querySelector(`[data-testid="${id}"]`);
+      return el?.currentTime ?? 0;
+    }, testId);
+
+  const first = await readAt();
+  await page.waitForTimeout(1500);
+  const second = await readAt();
+
+  expect(second, 'playback position should advance -- a still frame is not a live stream').
+    toBeGreaterThan(first);
+
+  return page.evaluate((id) => {
+    const el = document.querySelector(`[data-testid="${id}"]`);
+    return { width: el.videoWidth, height: el.videoHeight, paused: el.paused };
+  }, testId);
+}
+
 export const senders = (page, peerId) =>
   page.evaluate((id) => window.__app.senders(id), peerId ?? undefined);
 

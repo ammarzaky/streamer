@@ -186,17 +186,50 @@ function buildEngine() {
   });
 }
 
+/**
+ * Remote video tracks, kept by peer so the stage can be re-derived at any time.
+ *
+ * Transceivers are pre-allocated, so `ontrack` fires during the initial negotiation -- long
+ * before anyone starts sharing. Attaching only at that moment means the stage stays black
+ * forever, because the track arrived while `sharerId` was still null and nothing ever looked
+ * at it again. Ownership and media arrive independently, so the stage is a function of both
+ * rather than a side effect of whichever happened last.
+ */
+const remoteVideoTracks = new Map();
+
 function handleRemoteTrack({ peerId, role, track }) {
   if (role === 'video') {
-    // The stage shows the current sharer. Ownership is server-authoritative, so we only
-    // attach when this peer is the one share-state names.
-    if (store.state.share.sharerId === peerId) view.attachRemoteVideo(track);
+    remoteVideoTracks.set(peerId, track);
     track.addEventListener('ended', () => {
-      if (store.state.share.sharerId === peerId) view.clearRemoteVideo();
+      remoteVideoTracks.delete(peerId);
+      syncStage();
     });
+    syncStage();
     return;
   }
   view.attachRemoteAudio(peerId, track);
+}
+
+/** Put whatever the current sharer is sending on the stage, from whichever side it comes. */
+function syncStage() {
+  const { sharerId } = store.state.share;
+
+  if (!sharerId) {
+    view.clearRemoteVideo();
+    return;
+  }
+
+  if (sharerId === store.state.self.id) {
+    // Local preview. A sharer looking at a black rectangle cannot tell a working share from a
+    // broken one, and this is the only feedback that the right window was picked.
+    const local = media?.displayVideoTrack;
+    if (local) view.attachLocalPreview(local);
+    return;
+  }
+
+  const track = remoteVideoTracks.get(sharerId);
+  if (track) view.attachRemoteVideo(track);
+  else view.clearRemoteVideo();
 }
 
 function handleStatsSample(samples) {
@@ -500,7 +533,7 @@ function onShareState(data) {
     void stopSharing('lost');
   }
 
-  if (data.sharerId === null) view.clearRemoteVideo();
+  syncStage();
   view.renderAll();
 }
 
@@ -558,6 +591,9 @@ async function attachCapture(stream) {
   store.setSelf({ sharing: true, displayAudioActive: media.hasDisplayAudio });
   // Encoder parameters reset on renegotiation, so they are re-applied after every track swap.
   await quality.apply();
+  // The local track only exists now, so the preview can only be attached at this point --
+  // the share-state that granted ownership arrived before there was anything to show.
+  syncStage();
   view.renderAll();
 }
 

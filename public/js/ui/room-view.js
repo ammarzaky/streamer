@@ -452,12 +452,23 @@ export function createRoomView({ store, bus, EVENTS }) {
   // ---------------------------------------------------------------------------
 
   function attachRemoteVideo(track) {
-    const stream = new MediaStream([track]);
-    el.stageVideo.srcObject = stream;
+    // Replacing srcObject with an identical single-track stream restarts playback for no
+    // reason, so skip when the same track is already showing.
+    const current = el.stageVideo.srcObject;
+    if (current instanceof MediaStream && current.getVideoTracks()[0] === track) return;
+
+    el.stageVideo.srcObject = new MediaStream([track]);
+    cls(el.stageVideo, 'stage__video--mirror', false);
     el.stageVideo.play().catch(() => {
       // Autoplay refusal on a muted element is unusual but not fatal -- the picture appears
       // as soon as the user interacts with the page.
     });
+  }
+
+  /** The sharer's own preview. Same element, same path -- there is no second video surface to
+   *  keep in sync. */
+  function attachLocalPreview(track) {
+    attachRemoteVideo(track);
   }
 
   function clearRemoteVideo() {
@@ -550,6 +561,7 @@ export function createRoomView({ store, bus, EVENTS }) {
     showBanner,
     hideBanner,
     attachRemoteVideo,
+    attachLocalPreview,
     clearRemoteVideo,
     attachRemoteAudio,
     removePeerMedia,

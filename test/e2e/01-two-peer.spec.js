@@ -6,6 +6,7 @@ import {
   selfId,
   waitConnected,
   assertLiveVideo,
+  assertVideoElementPlaying,
   selectedCandidatePair,
 } from './helpers/app.js';
 
@@ -30,6 +31,16 @@ test('two peers connect and real media flows directly @smoke', async ({ browser 
 
   // The guest receives real, moving video -- not one frozen frame.
   await assertLiveVideo(guest, hostId);
+
+  // And it actually reaches the screen. getStats can report a perfect 1080p60 stream while
+  // the stage stays black, because attaching the track to the element is a separate step.
+  const painted = await assertVideoElementPlaying(guest);
+  expect(painted.width).toBeGreaterThanOrEqual(1280);
+  expect(painted.paused).toBe(false);
+
+  // The sharer sees their own screen too, rather than a black rectangle that gives no clue
+  // whether the right window was picked.
+  await assertVideoElementPlaying(host);
 
   // And it is peer-to-peer. A relay candidate would mean media is passing through a TURN
   // server, which is the one thing this architecture exists to avoid.
