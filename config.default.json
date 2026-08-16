@@ -124,11 +124,17 @@
       "Consecutive 1-second samples of a limitation reason before stepping down one rung.",
       "Bandwidth reacts faster than CPU because a saturated uplink degrades everything on the",
       "link, including the WebSocket; a busy CPU only degrades the video.",
-      "Raising is never automatic -- the UI suggests it and the user decides."
+      "Raising is never automatic -- the UI suggests it and the user decides.",
+      "",
+      "adaptWarmupMs ignores everything for the first seconds of a new video track. During",
+      "that window the encoder is still ramping and the send rate is legitimately far below",
+      "the cap while qualityLimitationReason reads 'bandwidth' -- the estimator probing, not",
+      "congestion. Adapting on it permanently downgrades a call that was about to be healthy."
     ],
     "stepDownSamplesCpu": 8,
-    "stepDownSamplesBandwidth": 4,
+    "stepDownSamplesBandwidth": 6,
     "adaptCooldownMs": 10000,
+    "adaptWarmupMs": 8000,
 
     "audio": {
       "_comment": [

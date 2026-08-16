@@ -40,18 +40,29 @@ export function createStatsCollector({ mesh, config, onSample }) {
     smoothed.delete(peerId);
   }
 
+  let ticking = false;
+
   async function tick() {
-    const results = [];
-    for (const peer of mesh.list()) {
-      try {
-        const report = await peer.getStats();
-        const sample = derive(peer.peerId, report);
-        if (sample) results.push(sample);
-      } catch (err) {
-        logger.debug('stats: getStats failed', { peerId: peer.peerId, error: err?.message });
+    // Peers are polled sequentially, so on a busy tab one tick can still be running when the
+    // next fires. Two overlapping ticks clobber `previous` and produce nonsense deltas.
+    if (ticking) return;
+    ticking = true;
+
+    try {
+      const results = [];
+      for (const peer of mesh.list()) {
+        try {
+          const report = await peer.getStats();
+          const sample = derive(peer.peerId, report);
+          if (sample) results.push(sample);
+        } catch (err) {
+          logger.debug('stats: getStats failed', { peerId: peer.peerId, error: err?.message });
+        }
       }
+      if (results.length) onSample?.(results);
+    } finally {
+      ticking = false;
     }
-    if (results.length) onSample?.(results);
   }
 
   /**
@@ -104,7 +115,13 @@ export function createStatsCollector({ mesh, config, onSample }) {
       if (selected) candidatePair = selected;
     }
 
-    const now = performance.now();
+    // The timestamp the counters were actually sampled at, taken from the report itself.
+    //
+    // Using performance.now() here would measure when the getStats promise happened to
+    // resolve, which drifts with main-thread load -- so under a stall dt inflates and every
+    // rate reads low, precisely when someone has opened the panel to find out why. Falling
+    // back to the wall clock only when no report carries a timestamp.
+    const now = outboundVideo?.timestamp ?? inboundVideo?.timestamp ?? transport?.timestamp ?? performance.now();
     const prev = previous.get(peerId);
 
     const current = {
@@ -125,7 +142,10 @@ export function createStatsCollector({ mesh, config, onSample }) {
 
     // Seconds actually elapsed, from the clock rather than the nominal interval.
     const dt = (current.t - prev.t) / 1000;
-    if (dt <= 0) return null;
+    // Reject a non-positive or implausible interval rather than publishing a rate derived
+    // from it. This also covers the case where the timestamp source differs between two
+    // samples because one report type was momentarily absent.
+    if (dt <= 0 || dt > 30) return null;
 
     const rate = (a, b) => Math.max(0, (a - b) * 8) / dt;
     const perSec = (a, b) => Math.max(0, a - b) / dt;

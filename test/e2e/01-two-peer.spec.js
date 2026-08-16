@@ -7,6 +7,7 @@ import {
   waitConnected,
   assertLiveVideo,
   assertVideoElementPlaying,
+  waitForResolution,
   selectedCandidatePair,
 } from './helpers/app.js';
 
@@ -35,8 +36,12 @@ test('two peers connect and real media flows directly @smoke', async ({ browser 
   // And it actually reaches the screen. getStats can report a perfect 1080p60 stream while
   // the stage stays black, because attaching the track to the element is a separate step.
   const painted = await assertVideoElementPlaying(guest);
-  expect(painted.width).toBeGreaterThanOrEqual(1280);
+  expect(painted.width).toBeGreaterThan(0);
   expect(painted.paused).toBe(false);
+
+  // The encoder ramps up over several seconds, so the full resolution is waited for rather
+  // than sampled once mid-ramp.
+  await waitForResolution(guest, hostId, 1280);
 
   // The sharer sees their own screen too, rather than a black rectangle that gives no clue
   // whether the right window was picked.

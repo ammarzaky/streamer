@@ -29,7 +29,20 @@ import { confirmDialog, showFatal, mountToastContainer } from './ui/dialog.js';
 
 const pathMatch = location.pathname.match(/^\/r\/([A-Za-z0-9_-]+)\/?$/);
 const routeRoomId = pathMatch ? pathMatch[1] : null;
-const isCreating = routeRoomId === 'new';
+
+/**
+ * Whether the NEXT join should create a room.
+ *
+ * Mutable on purpose. Once a room exists we must never create another, and a socket reconnect
+ * re-runs the join path: a host who arrived via /r/new would otherwise send `create-room`
+ * again, receive a different room id, and be moved -- alone -- into a brand new room while
+ * everyone else stayed behind in the original, with the invite link they were sent no longer
+ * matching the host's address bar.
+ */
+let isCreating = routeRoomId === 'new';
+
+/** The room we belong to, which is only the route for a join and is filled in for a create. */
+let activeRoomId = isCreating ? null : routeRoomId;
 
 /**
  * Where the host token lives, and why it is not in the URL.
@@ -154,7 +167,26 @@ let stats = null;
 let serverConfig = null;
 let leaving = false;
 
+/**
+ * Create (or re-create) the engine.
+ *
+ * `welcome` arrives on EVERY connection, including every reconnect, so this must be safe to
+ * call more than once. Building blindly the second time left the previous mesh open and still
+ * sending, the previous stats poller running forever against dead connections, and the
+ * previous media manager still holding the microphone -- while a second `getUserMedia` opened
+ * another one, so the operating system's microphone indicator never cleared.
+ *
+ * The media manager is deliberately kept across a rebuild: re-acquiring would re-prompt for
+ * permission and double-capture. Everything tied to peer connections is replaced.
+ */
 function buildEngine() {
+  // Tear down anything from a previous connection first.
+  stats?.stop();
+  stats = null;
+  mesh?.closeAll();
+  mesh = null;
+  remoteVideoTracks.clear();
+
   mesh = createMesh({
     send: (type, data) => signaling.send(type, data),
     config: serverConfig,
@@ -164,12 +196,25 @@ function buildEngine() {
       const peer = store.peer(peerId);
       toasts.error(`${errorCopy(err.code).message} (${peer?.name ?? peerId})`);
     },
+    // Negotiation resets encoder parameters, so they are re-applied every time one completes.
+    onNegotiated: () => void quality?.apply(),
   });
 
-  media = createMediaManager({
+  media ??= createMediaManager({
     config: serverConfig,
     onShareEnded: (reason) => void stopSharing(reason),
-    onDisplaySettingsChanged: (settings) => quality?.setCaptureHeight(settings.height),
+    onDisplayAudioEnded: () => {
+      // The share continues; only its audio is gone. Drop the dead track and stop claiming
+      // otherwise in the UI.
+      void mesh?.setLocalTrack('shareAudio', null);
+      store.setSelf({ displayAudioActive: false });
+    },
+    onDisplaySettingsChanged: (settings) => {
+      // Width or frame rate can change without the height moving, so the parameters are
+      // re-applied regardless of whether setCaptureHeight considers this a change.
+      quality?.setCaptureHeight(settings.height);
+      void quality?.apply();
+    },
   });
 
   quality = createQualityController({
@@ -223,7 +268,10 @@ function syncStage() {
     // Local preview. A sharer looking at a black rectangle cannot tell a working share from a
     // broken one, and this is the only feedback that the right window was picked.
     const local = media?.displayVideoTrack;
+    // The explicit clear matters: leaving the previous content up when we own the share but
+    // have no track yet would show the PREVIOUS sharer's video labelled as ours.
     if (local) view.attachLocalPreview(local);
+    else view.clearRemoteVideo();
     return;
   }
 
@@ -306,14 +354,17 @@ function sendJoin() {
 
   if (isCreating) {
     signaling.send(C2S.CREATE_ROOM, { name });
-  } else {
-    signaling.send(C2S.JOIN, {
-      roomId: routeRoomId,
-      name,
-      ...(hostToken ? { hostToken } : {}),
-      ...(accessCode ? { accessCode } : {}),
-    });
+    return;
   }
+
+  signaling.send(C2S.JOIN, {
+    // The room we are actually in, not the path we arrived on -- after a create those differ,
+    // and a reconnect must return to the same room.
+    roomId: activeRoomId ?? routeRoomId,
+    name,
+    ...(hostToken ? { hostToken } : {}),
+    ...(accessCode ? { accessCode } : {}),
+  });
 }
 
 // -----------------------------------------------------------------------------
@@ -393,6 +444,17 @@ function onWelcome(data) {
   };
 
   store.setRoom({ maxParticipants: data.maxParticipants ?? 4 });
+
+  // A reconnect gets a NEW peer id, so every queued message is addressed to a session that no
+  // longer exists and every peer must be rebuilt from the fresh `joined` snapshot rather than
+  // merged with stale state.
+  if (hasJoined) {
+    logger.info('signaling: reconnected, rebuilding the mesh');
+    signaling.dropQueue();
+    view.removeAllPeerMedia();
+    store.resetForRejoin();
+  }
+
   buildEngine();
   store.setQuality({ presetId: serverConfig.media.defaultPreset });
   sendJoin();
@@ -402,6 +464,12 @@ function onRoomCreated(data) {
   // Keyed by the real id explicitly: the store still says /r/new at this point, and a token
   // filed under "new" would be invisible to the reload that looks it up by room id.
   rememberHostToken(data.hostToken ?? null, data.roomId);
+
+  // The room now exists, so every later join -- including after a reconnect -- must be a
+  // join, never another create.
+  isCreating = false;
+  activeRoomId = data.roomId;
+
   history.replaceState(null, '', `/r/${data.roomId}`);
   applyJoinedIdentity({ ...data, isHost: true, participants: [], share: { sharerId: null, epoch: 0 } });
 }
@@ -445,10 +513,45 @@ function applyJoinedIdentity(data) {
   view.renderAll();
   installE2EHook();
 
-  void startLocalMedia();
+  void restoreLocalMedia();
 
   for (const participant of data.participants ?? []) mesh.addPeer(participant);
   stats.start();
+  syncStage();
+}
+
+/**
+ * Put our outgoing media back on the new mesh.
+ *
+ * On a first join this acquires the microphone. On a rejoin after a reconnect the microphone
+ * is already open -- re-acquiring would prompt again and leave two captures running -- so the
+ * existing tracks are simply re-attached to the freshly built peer connections.
+ */
+async function restoreLocalMedia() {
+  const existingMic = media?.micTrack;
+
+  if (existingMic) {
+    await mesh.setLocalTrack('mic', existingMic);
+    // Peers cannot observe `enabled`, so our mute state has to be restated to a room that
+    // has never heard it.
+    signaling.send(C2S.MUTE_STATE, { micMuted: store.state.self.micMuted });
+
+    if (media.isSharing) {
+      const video = media.displayVideoTrack;
+      const audio = media.displayAudioTrack;
+      if (video) await mesh.setLocalTrack('video', video);
+      if (audio) await mesh.setLocalTrack('shareAudio', audio);
+      // Ownership did not survive our disconnection: the server released the slot when our
+      // socket died. Ask for it back, and stop if somebody else has taken it -- otherwise two
+      // people would be transmitting screens at once.
+      signaling.send(C2S.CLAIM_SHARE, { force: false });
+    }
+
+    await quality.apply();
+    return;
+  }
+
+  await startLocalMedia();
 }
 
 async function startLocalMedia() {
@@ -482,7 +585,12 @@ function onPeerLeft(data) {
   mesh.removePeer(data.id);
   stats.forget(data.id);
   view.removePeerMedia(data.id);
+  // Not left to the track's `ended` event: Chrome fires it when the connection closes but
+  // Firefox historically does not, and a missed delete keeps a live MediaStreamTrack and its
+  // closure referenced for the life of the page.
+  remoteVideoTracks.delete(data.id);
   store.removePeer(data.id);
+  syncStage();
   void quality.apply();
 
   if (peer) {
@@ -539,6 +647,11 @@ function onShareState(data) {
 
 function onShareRevoked(data) {
   logger.info('share revoked', { by: data.byName, reason: data.reason });
+  // Clear the stage immediately rather than waiting for the claimant's grant to come back.
+  // For that round trip the store still names us as sharer, so without this the last frozen
+  // frame of a share we no longer own sits on screen under a "You are sharing" label.
+  remoteVideoTracks.delete(store.state.self.id);
+  view.clearRemoteVideo();
   void stopSharing('revoked', data.epoch);
   toasts.warn(UI.shareTakenOver(data.byName ?? 'Someone'));
 }
@@ -584,6 +697,7 @@ async function attachCapture(stream) {
 
   const settings = media.displaySettings();
   if (settings?.height) quality.setCaptureHeight(settings.height);
+  quality.setLocalVideoTrack(video);
 
   await mesh.setLocalTrack('video', video);
   if (audio) await mesh.setLocalTrack('shareAudio', audio);
@@ -609,6 +723,7 @@ async function stopSharing(reason, epoch = store.state.share.epoch) {
   if (!media?.isSharing) return;
 
   media.stopShare(reason);
+  quality.setLocalVideoTrack(null);
   await mesh.setLocalTrack('video', null);
   await mesh.setLocalTrack('shareAudio', null);
   store.setSelf({ sharing: false, displayAudioActive: false });
@@ -618,6 +733,11 @@ async function stopSharing(reason, epoch = store.state.share.epoch) {
   if (reason !== 'room-ended' && reason !== 'teardown' && signaling?.isOpen) {
     signaling.send(C2S.RELEASE_SHARE, { epoch });
   }
+
+  // The stage is showing our own preview, and the track behind it has just been stopped. The
+  // server's share-state confirming the release is a round trip away, so clear now rather
+  // than leaving a frozen final frame up in the meantime.
+  view.clearRemoteVideo();
 
   if (reason === 'native') toasts.info(UI.shareStoppedByBrowser);
   view.renderAll();

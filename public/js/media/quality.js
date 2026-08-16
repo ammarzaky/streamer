@@ -43,6 +43,12 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
    *  the preset, so sharing a 1440p monitor or a 720p window both behave correctly. */
   let captureHeight = null;
 
+  /** The outgoing video track, kept so the content hint can follow a preset change. */
+  let localVideoTrack = null;
+
+  /** When the current video track started, so adaptation can ignore the ramp-up transient. */
+  let videoStartedAt = null;
+
   // Adaptation counters. Bandwidth reacts sooner than CPU: a saturated uplink degrades
   // everything on the link including the signaling socket and the audio, while a busy CPU
   // only degrades the video.
@@ -52,8 +58,9 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
   let lastChangeAt = 0;
 
   const cpuThreshold = media.stepDownSamplesCpu ?? 8;
-  const bandwidthThreshold = media.stepDownSamplesBandwidth ?? 4;
+  const bandwidthThreshold = media.stepDownSamplesBandwidth ?? 6;
   const cooldownMs = media.adaptCooldownMs ?? 10_000;
+  const warmupMs = media.adaptWarmupMs ?? 8000;
 
   function preset() {
     return getPreset(presetId);
@@ -114,13 +121,27 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
   }
 
   /**
-   * Re-apply to every sender.
+   * Re-apply to every sender, one run at a time.
    *
-   * Called after every renegotiation (which resets encodings), after every replaceTrack, on
-   * preset change, and whenever the peer count changes -- the last because the per-peer cap is
-   * a function of how many people are in the room.
+   * `getParameters()` hands back an object carrying a `transactionId`, and the browser only
+   * honours `setParameters` for the most recently returned one. Two overlapping runs both
+   * read parameters before either writes, so the older write rejects with
+   * InvalidModificationError and that sender silently keeps the previous cap, scale factor
+   * and degradation preference. It is a genuine race, not a theoretical one: choosing a
+   * preset while a third participant joins triggers it, and starting a share triggers it
+   * every single time, because the capture-height update and the post-replaceTrack apply run
+   * back to back.
+   *
+   * Serializing costs nothing at this call rate and removes the whole class.
    */
-  async function apply() {
+  let applyChain = Promise.resolve();
+
+  function apply() {
+    applyChain = applyChain.then(applyNow, applyNow);
+    return applyChain;
+  }
+
+  async function applyNow() {
     const { cap, limited } = perPeerCap();
     const senders = mesh.videoSenders();
 
@@ -171,6 +192,8 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
     presetId = id;
     lastChangeAt = performance.now();
     resetCounters();
+    // The hint belongs to the preset, so it moves with it.
+    applyContentHint(localVideoTrack);
     await apply();
     logger.info('quality: preset set', { presetId, manual });
     return true;
@@ -183,6 +206,21 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
     // The scale factor is relative to this, so a source switch must re-apply or the picture
     // silently softens.
     void apply();
+  }
+
+  /**
+   * Tell the encoder what kind of content this is.
+   *
+   * `contentHint` is the companion to `degradationPreference`: 'motion' lets the encoder
+   * trade per-frame sharpness for frame rate, which is what the 60fps presets are chosen for,
+   * while 'detail' does the reverse for text. Setting the preference without the hint gets
+   * half the intended behaviour.
+   */
+  function applyContentHint(track) {
+    if (!track || track.kind !== 'video') return;
+    if (!('contentHint' in track)) return; // Firefox until recently
+    track.contentHint = preset().contentHint;
+    logger.debug('quality: content hint', { hint: track.contentHint });
   }
 
   function setUploadBudgetKbps(kbps) {
@@ -213,6 +251,17 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
   function observe(samples) {
     if (!autoAdapt || samples.length === 0) return;
     if (performance.now() - lastChangeAt < cooldownMs) return;
+
+    // Ignore everything while the encoder is still ramping up.
+    //
+    // For the first several seconds of a new video track the send rate is legitimately far
+    // below the cap and `qualityLimitationReason` reads 'bandwidth' -- not because the link
+    // is congested, but because the bandwidth estimator is still probing upward. Adapting on
+    // that permanently downgrades a call that was about to be perfectly healthy: measured on
+    // this machine, a 1080p60 share reported 'bandwidth' at 960x540 for the first five
+    // seconds and then settled at a stable 1920x1080. Stepping down in that window is not a
+    // response to a problem, it is a response to a start-up transient.
+    if (videoStartedAt !== null && performance.now() - videoStartedAt < warmupMs) return;
 
     const { cap } = perPeerCap();
 
@@ -285,10 +334,20 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
     }
   }
 
+  /** Called whenever the outgoing video track changes, including when it is cleared. */
+  function setLocalVideoTrack(track) {
+    localVideoTrack = track ?? null;
+    applyContentHint(localVideoTrack);
+    // A new track means a new ramp-up, so the warm-up window restarts with it.
+    videoStartedAt = track ? performance.now() : null;
+    resetCounters();
+  }
+
   return {
     apply,
     setPreset,
     setCaptureHeight,
+    setLocalVideoTrack,
     setUploadBudgetKbps,
     observe,
 

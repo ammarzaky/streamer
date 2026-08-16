@@ -27,6 +27,10 @@ const MAX_QUEUED_CANDIDATES = 256;
  *  immediately turns an ordinary hiccup into a visible failure. */
 const DISCONNECTED_GRACE_MS = 5000;
 
+/** How long a recovery attempt gets before the user is told it failed. Long enough for an
+ *  ICE restart to complete on a slow link, short enough not to be a permanent spinner. */
+const GIVE_UP_AFTER_MS = 15_000;
+
 /** Fixed transceiver order. Both sides depend on this, since the polite peer adopts
  *  transceivers by index from the offer. */
 const TRACK_ROLES = ['mic', 'shareAudio', 'video'];
@@ -43,6 +47,7 @@ export function createPeer({
   onTrack,
   onStateChange,
   onFailed,
+  onNegotiated,
 }) {
   const pc = new RTCPeerConnection({
     iceServers,
@@ -54,6 +59,23 @@ export function createPeer({
   /** role -> RTCRtpTransceiver */
   const tx = new Map();
 
+  /**
+   * The tracks this peer SHOULD be sending, recorded whether or not a sender exists yet.
+   *
+   * Only the initiating side creates transceivers up front; the answering side has none until
+   * the remote offer arrives and `adoptTransceivers` runs. Local media does not wait for that
+   * -- `getUserMedia` resolves on its own schedule -- so an attach attempt genuinely can
+   * arrive before there is anywhere to put it.
+   *
+   * Recording the intent and flushing it on adoption is what makes the order irrelevant.
+   * Without it the attach silently does nothing and is never retried: the connection reports
+   * `connected`, the track is live and enabled, the roster shows the person as unmuted, and
+   * nobody can hear them for the rest of the session. Worse, which side wins is a race
+   * between local media and a network round trip, so it passes on a LAN and fails more
+   * reliably the further apart the participants are.
+   */
+  const desiredTracks = { mic: null, shareAudio: null, video: null };
+
   // Perfect negotiation bookkeeping.
   let makingOffer = false;
   let ignoreOffer = false;
@@ -61,7 +83,9 @@ export function createPeer({
 
   let pendingCandidates = [];
   let disconnectedTimer = null;
+  let giveUpTimer = null;
   let restartAttempts = 0;
+  let reportedFailed = false;
   let closed = false;
 
   // -------------------------------------------------------------------------
@@ -94,7 +118,7 @@ export function createPeer({
    * sending. A polite peer that skips this appears completely healthy -- connection state
    * `connected`, no errors anywhere -- and simply never sends any media.
    */
-  function adoptTransceivers() {
+  async function adoptTransceivers() {
     const all = pc.getTransceivers();
     TRACK_ROLES.forEach((role, index) => {
       const transceiver = all[index];
@@ -105,20 +129,50 @@ export function createPeer({
       }
     });
     logger.debug('peer: adopted transceivers', { peerId, count: tx.size });
+
+    // Anything that wanted to be sent before these existed goes on now. This runs before
+    // createAnswer, so the tracks are in the initial answer rather than needing a second
+    // negotiation.
+    await flushDesiredTracks();
   }
 
   const sender = (role) => tx.get(role)?.sender ?? null;
 
-  /** Attach or clear a track without renegotiating. */
+  /**
+   * Attach or clear a track without renegotiating.
+   *
+   * Always records the intent first, so an attach that arrives before the transceivers exist
+   * is applied later rather than lost.
+   */
   async function setTrack(role, track) {
+    desiredTracks[role] = track ?? null;
+
     const s = sender(role);
-    if (!s) return false;
+    if (!s) {
+      logger.debug('peer: track queued until transceivers exist', { peerId, role });
+      return false;
+    }
+
     try {
       await s.replaceTrack(track ?? null);
       return true;
     } catch (err) {
       logger.warn('peer: replaceTrack failed', { peerId, role, error: err?.message });
       return false;
+    }
+  }
+
+  async function flushDesiredTracks() {
+    for (const role of TRACK_ROLES) {
+      const track = desiredTracks[role];
+      const s = sender(role);
+      if (!s || !track) continue;
+      try {
+        await s.replaceTrack(track);
+        logger.debug('peer: flushed queued track', { peerId, role });
+      } catch (err) {
+        logger.warn('peer: flush replaceTrack failed', { peerId, role, error: err?.message });
+      }
     }
   }
 
@@ -221,10 +275,18 @@ export function createPeer({
       }
 
       if (isOffer) {
-        if (tx.size === 0) adoptTransceivers();
+        if (tx.size === 0) await adoptTransceivers();
         await pc.setLocalDescription();
         send('answer', { to: peerId, description: pc.localDescription });
+        // Encoder parameters are reset by negotiation, so whoever owns them is told to
+        // re-apply. Without this an ICE restart silently drops the bitrate cap, the scale
+        // factor and the degradation preference.
+        onNegotiated?.(peerId);
       }
+
+      // An answer completes a negotiation we started, and resets encoder parameters just as
+      // an inbound offer does.
+      if (!isOffer) onNegotiated?.(peerId);
 
       await flushCandidates();
     });
@@ -292,6 +354,8 @@ export function createPeer({
     switch (state) {
       case 'connected':
         restartAttempts = 0;
+        reportedFailed = false;
+        clearTimeout(giveUpTimer);
         onStateChange?.({ peerId, state: 'connected' });
         break;
 
@@ -337,16 +401,41 @@ export function createPeer({
       logger.info('peer: restarting ICE', { peerId });
       try {
         pc.restartIce();
+        // If the restart does not take, the connection ends up back here via `failed`, or
+        // this timer reports it. Without the timer an answerer whose initiator is asleep in a
+        // backgrounded tab sits on "reconnecting" forever and is never told otherwise.
+        armGiveUpTimer();
         return;
       } catch (err) {
         logger.warn('peer: restartIce failed', { peerId, error: err?.message });
       }
     }
 
-    if (pc.connectionState === 'failed' || restartAttempts > 0) {
-      onStateChange?.({ peerId, state: 'failed' });
-      onFailed?.(new AppError(ERRORS.ICE_FAILED, { detail: `peer ${name}` }));
+    if (!youInitiate && pc.connectionState === 'disconnected') {
+      // The answering side must not restart -- both sides restarting produces duelling offers
+      // exactly when the connection can least afford them. But it must still give up out
+      // loud rather than showing "reconnecting" indefinitely.
+      armGiveUpTimer();
+      return;
     }
+
+    giveUp();
+  }
+
+  function armGiveUpTimer() {
+    clearTimeout(giveUpTimer);
+    giveUpTimer = setTimeout(() => {
+      if (closed) return;
+      if (pc.connectionState === 'connected') return;
+      giveUp();
+    }, GIVE_UP_AFTER_MS);
+  }
+
+  function giveUp() {
+    if (closed || reportedFailed) return;
+    reportedFailed = true;
+    onStateChange?.({ peerId, state: 'failed' });
+    onFailed?.(new AppError(ERRORS.ICE_FAILED, { detail: `peer ${name}` }));
   }
 
   // -------------------------------------------------------------------------
@@ -363,7 +452,11 @@ export function createPeer({
     if (closed) return;
     closed = true;
     clearTimeout(disconnectedTimer);
+    clearTimeout(giveUpTimer);
     pendingCandidates = [];
+    desiredTracks.mic = null;
+    desiredTracks.shareAudio = null;
+    desiredTracks.video = null;
 
     // Stopping transceivers before closing lets the remote see the tracks end promptly rather
     // than waiting for its own connection state to catch up.

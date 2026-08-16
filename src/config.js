@@ -62,10 +62,45 @@ export function validateConfig(config) {
   if (!(config.rooms.emptyRoomGraceMs > config.rooms.hostGraceMs)) fail('rooms.emptyRoomGraceMs', 'must be greater than rooms.hostGraceMs');
 }
 
+/**
+ * The `welcome` payload.
+ *
+ * An explicit allowlist, never a filtered copy of the config: `logging` and `tls` must never
+ * reach a browser, and TURN credentials are included only when TURN is actually enabled.
+ *
+ * Everything the client reads has to be listed here. A setting that exists in config but is
+ * missing from this object silently falls back to the client's own default, so changing it in
+ * config.json appears to do nothing -- which is worse than not offering the setting at all.
+ */
 export function toClientConfig(config) {
-  const iceServers = config.webrtc.iceServers.map((x) => ({ ...x }));
-  if (config.webrtc.turn.enabled) iceServers.push({ urls: config.webrtc.turn.urls, username: config.webrtc.turn.username, credential: config.webrtc.turn.credential });
-  return { iceServers, maxParticipants: config.rooms.maxParticipants, defaultPreset: config.media.defaultPreset,
-    uploadBudgetKbps: config.media.uploadBudgetKbps, autoAdapt: config.media.autoAdapt,
-    oneSharerAtATime: config.rooms.oneSharerAtATime, limits: { maxNameChars: LIMITS.MAX_NAME_CHARS } };
+  const iceServers = config.webrtc.iceServers.map((server) => ({ ...server }));
+  if (config.webrtc.turn.enabled) {
+    iceServers.push({
+      urls: config.webrtc.turn.urls,
+      username: config.webrtc.turn.username,
+      credential: config.webrtc.turn.credential,
+    });
+  }
+
+  return {
+    iceServers,
+    iceTransportPolicy: config.webrtc.iceTransportPolicy,
+    bundlePolicy: config.webrtc.bundlePolicy,
+
+    maxParticipants: config.rooms.maxParticipants,
+    oneSharerAtATime: config.rooms.oneSharerAtATime,
+
+    defaultPreset: config.media.defaultPreset,
+    uploadBudgetKbps: config.media.uploadBudgetKbps,
+    autoAdapt: config.media.autoAdapt,
+    stepDownSamplesCpu: config.media.stepDownSamplesCpu,
+    stepDownSamplesBandwidth: config.media.stepDownSamplesBandwidth,
+    adaptCooldownMs: config.media.adaptCooldownMs,
+    adaptWarmupMs: config.media.adaptWarmupMs,
+    includeDisplayAudio: config.media.includeDisplayAudio,
+    statsPollIntervalMs: config.media.statsPollIntervalMs,
+    audio: { ...config.media.audio },
+
+    limits: { maxNameChars: LIMITS.MAX_NAME_CHARS },
+  };
 }

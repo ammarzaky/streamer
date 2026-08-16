@@ -499,6 +499,13 @@ export function createRoomView({ store, bus, EVENTS }) {
     }
   }
 
+  /** Drop every remote audio element. Needed after our own reconnect, where the peers keep
+   *  their identities but every id changes, so no peer-left ever arrives to clean them up. */
+  function removeAllPeerMedia() {
+    for (const peerId of [...audioElements.keys()]) removePeerMedia(peerId);
+    clearRemoteVideo();
+  }
+
   // ---------------------------------------------------------------------------
   // Banners
   // ---------------------------------------------------------------------------
@@ -565,6 +572,7 @@ export function createRoomView({ store, bus, EVENTS }) {
     clearRemoteVideo,
     attachRemoteAudio,
     removePeerMedia,
+    removeAllPeerMedia,
     renderAll() {
       renderSelfControls();
       renderShareControl();

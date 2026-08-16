@@ -182,6 +182,23 @@ export async function assertVideoElementPlaying(page, testId = 'stage-video') {
   }, testId);
 }
 
+/**
+ * Wait for the delivered resolution to reach `minWidth`.
+ *
+ * Polled rather than asserted once, because a video encoder legitimately starts small and
+ * scales up over several seconds -- a single reading taken during that ramp says nothing
+ * about the steady state, and asserting on it would either flake or force the product to
+ * promise a resolution floor it deliberately does not.
+ */
+export async function waitForResolution(page, peerId, minWidth, timeout = 30_000) {
+  await expect
+    .poll(async () => (await inboundVideo(page, peerId))?.frameWidth ?? 0, {
+      timeout,
+      message: `inbound video should reach at least ${minWidth}px wide`,
+    })
+    .toBeGreaterThanOrEqual(minWidth);
+}
+
 export const senders = (page, peerId) =>
   page.evaluate((id) => window.__app.senders(id), peerId ?? undefined);
 

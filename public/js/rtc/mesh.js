@@ -13,7 +13,7 @@ import { C2S, S2C } from '../../shared/protocol.js';
 import { createPeer } from './peer.js';
 import { logger } from '../core/logger.js';
 
-export function createMesh({ send, config, onTrack, onPeerState, onPeerFailed }) {
+export function createMesh({ send, config, onTrack, onPeerState, onPeerFailed, onNegotiated }) {
   /** peerId -> Peer */
   const peers = new Map();
 
@@ -53,14 +53,17 @@ export function createMesh({ send, config, onTrack, onPeerState, onPeerFailed })
       onTrack,
       onStateChange: onPeerState,
       onFailed: (err) => onPeerFailed?.(id, err),
+      onNegotiated,
     });
 
     peers.set(id, peer);
     peer.start();
 
-    // Attach whatever we are already sending. For the initiator this happens before the first
-    // offer is composed, so the tracks are in the initial SDP rather than requiring a second
-    // negotiation.
+    // Record whatever we are already sending. For the initiator the transceivers exist by
+    // now, so the tracks land in the initial offer. For the answerer they do not exist yet,
+    // and `setTrack` queues the intent until `adoptTransceivers` runs -- which is what stops
+    // a joiner's microphone being silently dropped when local media wins the race against
+    // the remote offer.
     applyLocalTracks(peer);
 
     logger.info('mesh: peer added', {
@@ -87,8 +90,13 @@ export function createMesh({ send, config, onTrack, onPeerState, onPeerFailed })
 
   function applyLocalTracks(peer) {
     for (const role of ['mic', 'shareAudio', 'video']) {
-      if (localTracks[role]) peer.setTrack(role, localTracks[role]);
+      if (localTracks[role]) void peer.setTrack(role, localTracks[role]);
     }
+  }
+
+  /** Everything currently being sent, so a rebuilt connection can be brought back up to date. */
+  function currentLocalTracks() {
+    return { ...localTracks };
   }
 
   /**
@@ -141,6 +149,7 @@ export function createMesh({ send, config, onTrack, onPeerState, onPeerFailed })
     setLocalTrack,
     setIceServers,
     handleMessage,
+    currentLocalTracks,
 
     peer: (id) => peers.get(id) ?? null,
     peerIds: () => [...peers.keys()],

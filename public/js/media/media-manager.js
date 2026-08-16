@@ -19,7 +19,12 @@ import { logger } from '../core/logger.js';
 import { isE2E } from '../core/env.js';
 import { makeSyntheticDisplayStream } from './synthetic-stream.js';
 
-export function createMediaManager({ config, onShareEnded, onDisplaySettingsChanged }) {
+export function createMediaManager({
+  config,
+  onShareEnded,
+  onDisplayAudioEnded,
+  onDisplaySettingsChanged,
+}) {
   /** @type {MediaStream|null} */
   let micStream = null;
   /** In-flight getUserMedia, so concurrent callers share one device request. */
@@ -192,9 +197,17 @@ export function createMediaManager({ config, onShareEnded, onDisplaySettingsChan
         'ended',
         () => {
           logger.info('media: display track ended', { kind: track.kind });
-          // Only the video ending means the share is over. The audio track ending on its own
-          // just means the shared audio stopped.
-          if (track.kind === 'video' && sharing) onShareEnded?.('native');
+
+          if (track.kind === 'video') {
+            // Only the video ending means the share is over.
+            if (sharing) onShareEnded?.('native');
+            return;
+          }
+
+          // The audio ending on its own does not stop the share, but it does mean the shared
+          // audio is gone -- and leaving a dead track on the sender while the UI still claims
+          // audio is live is its own small lie.
+          if (sharing) onDisplayAudioEnded?.();
         },
         { once: true },
       );
@@ -204,14 +217,16 @@ export function createMediaManager({ config, onShareEnded, onDisplaySettingsChan
     // object alive -- no `ended`, nothing to tear down -- but the frame size changes. Without
     // re-reading it, the encoder scale factor is computed against the old dimensions and the
     // picture goes soft for everyone.
+    //
+    // Attached unconditionally: gating on `'onconfigurationchange' in track` skips browsers
+    // that dispatch the event without reflecting the IDL attribute, and an unused listener
+    // costs nothing while a missing one is a silent quality regression.
     const video = stream.getVideoTracks()[0];
-    if (video && 'onconfigurationchange' in video) {
-      video.addEventListener('configurationchange', () => {
-        const settings = video.getSettings();
-        logger.debug('media: display configuration changed', settings);
-        onDisplaySettingsChanged?.(settings);
-      });
-    }
+    video?.addEventListener('configurationchange', () => {
+      const settings = video.getSettings();
+      logger.debug('media: display configuration changed', settings);
+      onDisplaySettingsChanged?.(settings);
+    });
   }
 
   /**
