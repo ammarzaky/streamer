@@ -9,3 +9,8 @@ scratchpad/
 Thumbs.db
 dist/
 dist-next/
+
+# Never committed here, and nothing named .env exists — this is cheap insurance against a
+# future accident on a public repo.
+.env
+.env.*

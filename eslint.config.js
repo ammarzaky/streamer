@@ -11,8 +11,9 @@ export default [
       'scratchpad/**',
       // Packaged output. It contains a copy of src/ and public/, so without this every file is
       // linted twice -- the second time under the wrong config, since the copies sit at paths
-      // no `files:` block below matches and therefore get no globals at all.
-      'dist/**',
+      // no `files:` block below matches and therefore get no globals at all. Globbed rather than
+      // named, so an alternate output directory does not quietly reintroduce 280 phantom errors.
+      'dist*/**',
     ],
   },
 

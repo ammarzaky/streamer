@@ -1,6 +1,6 @@
 appId: dev.streamer.app
 productName: Streamer
-copyright: ''
+copyright: Copyright (c) 2026 Ammar Zaky
 
 directories:
   output: dist
