@@ -52,6 +52,19 @@ const STEPS = [
       return false;
     },
   },
+  {
+    // Its own config, and therefore its own step: the browser config declares a webServer that
+    // Playwright starts for every project in the file, and the desktop app starts a server of
+    // its own -- sharing one config would put two servers on one port every run.
+    name: 'desktop',
+    args: [bin('@playwright', 'test', 'cli.js'), 'test', '--config=playwright.desktop.config.js'],
+    skipIf: () => {
+      if (args.has('--no-e2e') || args.has('--no-desktop')) return 'skipped by flag';
+      if (!existsSync(bin('electron'))) return 'electron not installed';
+      if (!existsSync(join(ROOT, 'test', 'desktop'))) return 'no desktop tests yet';
+      return false;
+    },
+  },
 ];
 
 function run(step) {

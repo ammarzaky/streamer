@@ -8,9 +8,20 @@ Symptom first, because that is what you have.
 
 ### "This site can't be reached" / nothing happens
 
+**You typed the address without `https://`.** A bare `192.168.1.34:8443` is treated as `http://`
+by every browser, and a TLS port cannot answer a plaintext request — the connection is dropped
+with no hint that the address was right and only the scheme was wrong. The server now detects
+this and redirects, so it should just work; if you are on an older build, type `https://`.
+
 **On the same network:** the Windows Firewall prompt was denied, or was allowed only for Public
 networks. Re-run `npm start` and allow it for **Private**. Confirm the server is actually
 running and check the address with `npm run links`.
+
+**Still nothing, and the address is definitely right?** Check your antivirus. Avast, Kaspersky and
+Norton run their own firewall alongside Windows Firewall, and allowing the app in one does nothing
+for the other — this is the single most time-consuming false lead in this whole document, because
+every Windows-side check passes while nothing gets through. Disable the antivirus firewall for two
+minutes to confirm, then add a permanent rule there.
 
 **From another network:** this is connection 1 in [NETWORK.md](NETWORK.md), and it has nothing
 to do with WebRTC. Port 8443 is not reachable from outside. Check this *before* investigating
@@ -18,8 +29,24 @@ anything about video, because until the page loads no peer connection is even at
 
 ### A certificate warning
 
-Expected. See [CERTIFICATES.md](CERTIFICATES.md). Verify the fingerprint with `npm run links`,
-then click through — or install `certs/ca.crt` on the device to stop seeing it.
+Expected in a **browser**. See [CERTIFICATES.md](CERTIFICATES.md). Verify the fingerprint with
+`npm run links`, then click through — or install `certs/ca.crt` on the device to stop seeing it.
+
+In the **desktop app** you should never see one: the invite link carries the fingerprint. If you
+do, you were sent an `https://` link rather than a `streamer://` one — ask for the app link.
+
+### The app says it refused to connect because the certificate did not match
+
+Not the same thing as a warning, and not something to click past — the app reached the machine and
+declined to trust it. Usually the host reissued their certificate (a new LAN IP will do it) and
+your link is stale, so ask for a fresh one. If a link you trust keeps doing this, stop and find
+out why the certificate is changing before going further.
+
+### Nothing happens when I open a `streamer://` link
+
+Chat clients often strip or mangle custom protocol links. Copy the text and paste it into the
+app's Join box instead — it accepts a pasted link, and tells you what it parsed before you press
+Join.
 
 ### "Screen sharing needs a secure connection"
 

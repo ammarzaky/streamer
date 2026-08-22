@@ -2,21 +2,33 @@ import { ensureCertificates, fingerprint } from '../scripts/make-certs.mjs';
 import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
 import { createHttpRedirect } from './net/httpRedirect.js';
-import { createHttpsServer, listen } from './net/httpsServer.js';
+import { createHttpsServer, createFrontDoor, listen } from './net/httpsServer.js';
 import { createStaticHandler } from './net/staticFiles.js';
 import { configureIds } from './signaling/ids.js';
 import { attachSignaling } from './signaling/server.js';
 import { lanIps } from './util/lanIp.js';
 
-export async function startServer({ cwd = process.cwd(), env = process.env, config: supplied } = {}) {
-  const config = supplied ?? (await loadConfig({ cwd, env }));
+export async function startServer({
+  cwd = process.cwd(),
+  env = process.env,
+  overridesDir = cwd,
+  config: supplied,
+} = {}) {
+  const config = supplied ?? (await loadConfig({ cwd, env, overridesDir }));
   configureIds(config);
+  // Writes into STREAMER_CERT_DIR when set, which is how the packaged app keeps its keys in
+  // userData rather than trying to write inside a read-only application directory.
   ensureCertificates({ quiet: true });
 
   const log = createLogger(config.logging.level);
   const server = await createHttpsServer(config, createStaticHandler(config, cwd), cwd);
   const signaling = attachSignaling(server, config, log);
-  const address = await listen(server, config.server.port, config.server.host);
+
+  // The TLS server never binds the port itself. A front door does, peeks at the first byte,
+  // and either hands the connection over untouched or answers plain HTTP with a redirect --
+  // so someone who typed the address without https:// gets the app instead of a dead page.
+  const frontDoor = createFrontDoor(server);
+  const address = await listen(frontDoor, config.server.port, config.server.host);
 
   let redirect = null;
   if (config.server.httpRedirect.enabled) {
@@ -56,7 +68,7 @@ export async function startServer({ cwd = process.cwd(), env = process.env, conf
 
     const graceMs = config.server.shutdownGraceMs ?? 3000;
     await Promise.race([
-      Promise.all([closeHttp(server), closeHttp(redirect)]),
+      Promise.all([closeHttp(frontDoor), closeHttp(server), closeHttp(redirect)]),
       new Promise((resolve) => {
         const timer = setTimeout(resolve, graceMs);
         timer.unref?.();
@@ -64,7 +76,20 @@ export async function startServer({ cwd = process.cwd(), env = process.env, conf
     ]);
   }
 
-  return { server, signaling, registry: signaling.registry, config, port, close, log };
+  return {
+    server,
+    frontDoor,
+    signaling,
+    registry: signaling.registry,
+    config,
+    port,
+    close,
+    log,
+    // Trust an origin that did not exist at startup -- a tunnel hostname, in practice. Without
+    // it the WebSocket upgrade through a tunnel is rejected 403 by the same-origin check.
+    allowOrigin: signaling.allowOrigin,
+    forgetOrigin: signaling.forgetOrigin,
+  };
 }
 
 // ---------------------------------------------------------------------------

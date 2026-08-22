@@ -12,6 +12,7 @@ import {
   effectiveCapBps,
   bestPresetForBudget,
   scaleResolutionDownBy,
+  isBandwidthGenuinelyShort,
 } from '../../public/shared/quality-math.js';
 
 test('preset ladder is ordered strictly by ascending bitrate', () => {
@@ -127,4 +128,85 @@ test('scaleResolutionDownBy never returns a value below 1', () => {
   for (const capture of [0, -1, NaN, undefined, null]) {
     assert.equal(scaleResolutionDownBy(capture, 720), 1, `capture=${capture}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Distinguishing real congestion from the encoder's start-up ramp
+// ---------------------------------------------------------------------------
+
+const CAP = 6_000_000; // the 1080p60 ceiling
+
+test('the encoder start-up ramp is not mistaken for congestion', () => {
+  // These are real numbers, sampled from a healthy loopback share at the 1080p60 default while
+  // the encoder climbed 960x540 -> 1280x720 -> 1920x1080. Every one of them reports
+  // 'bandwidth' with the send rate far below the cap, and every one of them is fine.
+  const ramp = [
+    { qualityLimitationReason: 'bandwidth', actualBitrateBps: 1_090_000, availableOutgoingBitrate: 5_040_000 },
+    { qualityLimitationReason: 'bandwidth', actualBitrateBps: 1_340_000, availableOutgoingBitrate: 5_040_000 },
+    { qualityLimitationReason: 'bandwidth', actualBitrateBps: 940_000, availableOutgoingBitrate: 5_040_000 },
+    { qualityLimitationReason: 'bandwidth', actualBitrateBps: 1_050_000, availableOutgoingBitrate: 5_040_000 },
+  ];
+  for (const sample of ramp) {
+    assert.equal(
+      isBandwidthGenuinelyShort(sample, CAP),
+      false,
+      `send=${sample.actualBitrateBps} bwe=${sample.availableOutgoingBitrate} must not trigger a step down`,
+    );
+  }
+});
+
+test('a link that genuinely cannot carry the preset does step down', () => {
+  assert.equal(
+    isBandwidthGenuinelyShort(
+      { qualityLimitationReason: 'bandwidth', actualBitrateBps: 2_000_000, availableOutgoingBitrate: 2_200_000 },
+      CAP,
+    ),
+    true,
+  );
+});
+
+test('only a bandwidth limitation counts, whatever the numbers say', () => {
+  for (const reason of ['none', 'cpu', 'other', undefined]) {
+    assert.equal(
+      isBandwidthGenuinelyShort(
+        { qualityLimitationReason: reason, actualBitrateBps: 1, availableOutgoingBitrate: 1 },
+        CAP,
+      ),
+      false,
+      `reason=${reason}`,
+    );
+  }
+  assert.equal(isBandwidthGenuinelyShort(null, CAP), false);
+});
+
+test('without a bandwidth estimate, the weaker send-rate test still applies', () => {
+  // Firefox does not always expose availableOutgoingBitrate. Never adapting there would be
+  // worse than adapting on imperfect evidence.
+  const noEstimate = (actualBitrateBps) => ({
+    qualityLimitationReason: 'bandwidth',
+    actualBitrateBps,
+    availableOutgoingBitrate: null,
+  });
+  assert.equal(isBandwidthGenuinelyShort(noEstimate(1_000_000), CAP), true);
+  assert.equal(isBandwidthGenuinelyShort(noEstimate(5_000_000), CAP), false);
+});
+
+test('the estimate is believed over the send rate, in both directions', () => {
+  // Sending little but with plenty of headroom: a ramp, or simple content. Not congestion.
+  assert.equal(
+    isBandwidthGenuinelyShort(
+      { qualityLimitationReason: 'bandwidth', actualBitrateBps: 500_000, availableOutgoingBitrate: 9_000_000 },
+      CAP,
+    ),
+    false,
+  );
+  // Sending near the cap while the estimate has collapsed under it: congestion arriving, and
+  // the send-rate test would have missed it entirely.
+  assert.equal(
+    isBandwidthGenuinelyShort(
+      { qualityLimitationReason: 'bandwidth', actualBitrateBps: 5_800_000, availableOutgoingBitrate: 3_000_000 },
+      CAP,
+    ),
+    true,
+  );
 });

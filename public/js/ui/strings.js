@@ -58,6 +58,14 @@ export const UI = {
   sessionTime: 'Session time',
 
   // -- Controls --
+  fullscreen: 'Fullscreen',
+  exitFullscreen: 'Exit fullscreen',
+
+  micCheckChecking: 'Checking your microphone…',
+  micCheckHearing: 'Microphone is working.',
+  micCheckQuiet: 'Microphone is on. Say something to see the bar move.',
+  micCheckFailed: 'No microphone. You can still watch and share your screen.',
+
   mute: 'Mute',
   unmute: 'Unmute',
   micOn: 'Mic on',
@@ -103,7 +111,14 @@ export const UI = {
   // -- Stats panel --
   statsTarget: 'Target',
   statsActual: 'Actual',
-  statsSending: 'Sending',
+  statsSending: 'Sending video',
+  statsMicSending: 'Sending mic',
+  statsAudioReceiving: 'Receiving audio',
+  /** Shown when there is no outbound audio report at all: the microphone is not on this
+   *  connection, which is a different problem from it being muted. */
+  statsMicNotSent: 'not being sent',
+  /** Muting keeps the RTP session up and sends silence, so the bitrate stays non-zero. */
+  statsMicMuted: 'muted, sending silence',
   statsReceiving: 'Receiving',
   statsFrames: 'Frames',
   statsDropped: 'Dropped',

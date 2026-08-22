@@ -1,0 +1,153 @@
+.host {
+  padding: 18px 20px 12px;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.host__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line-1);
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+
+.host__status .muted {
+  margin-left: auto;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-3);
+  flex: none;
+}
+
+.dot.is-live {
+  background: var(--ok);
+}
+
+.dot.is-error {
+  background: var(--danger);
+}
+
+.host__block {
+  padding-bottom: 18px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--line-1);
+}
+
+.host__block--last {
+  border-bottom: none;
+}
+
+.host__block p {
+  font-size: 12.5px;
+  margin-bottom: 10px;
+}
+
+/* --- Invite links ------------------------------------------------------- */
+
+.link {
+  background: var(--surface-2);
+  border: 1px solid var(--line-1);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+
+.link__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.link__host {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.link__tag {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-3);
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+/* The one address that works from another country, marked so it is not lost among the local
+   ones it is listed above. */
+.link__tag--good {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.host__upnp {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-1);
+}
+
+.link__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.link__value {
+  flex: 1;
+  min-width: 0;
+  /* Two lines maximum: a fingerprint-bearing link is long, and letting it grow unbounded pushes
+     everything else off the panel. */
+  max-height: 2.6em;
+  overflow: hidden;
+}
+
+.link__row button {
+  flex: none;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+/* --- Controls ----------------------------------------------------------- */
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+
+.check input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+#fingerprint {
+  display: block;
+  background: var(--surface-2);
+  border: 1px solid var(--line-1);
+  border-radius: 8px;
+  padding: 9px 11px;
+  line-height: 1.6;
+}
+
+.host__foot {
+  margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-1);
+  display: flex;
+  justify-content: flex-end;
+}

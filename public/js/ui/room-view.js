@@ -39,6 +39,18 @@ export function createRoomView({ store, bus, EVENTS }) {
     participantCount: need('#participant-count'),
     statsPanel: need('#stats-panel'),
 
+    lobbyMeter: need('#lobby-meter-fill'),
+    lobbyMicStatus: need('#lobby-mic-status'),
+
+    fullscreenToggle: need('#fullscreen-toggle'),
+    fullscreenLabel: need('#fullscreen-label'),
+    stageOverlay: need('#stage-overlay'),
+    overlayMic: need('#overlay-mic'),
+    overlayMicIcon: need('#overlay-mic-icon'),
+    overlayMicLabel: need('#overlay-mic-label'),
+    overlayMeter: need('#overlay-meter-fill'),
+    overlayExit: need('#overlay-exit'),
+
     micToggle: need('#mic-toggle'),
     micIcon: need('#mic-icon'),
     micLabel: need('#mic-label'),
@@ -174,6 +186,12 @@ export function createRoomView({ store, bus, EVENTS }) {
     cls(el.micToggle, 'ctl--active', !muted);
     el.micToggle.setAttribute('aria-pressed', String(muted));
     el.micToggle.dataset.micMuted = String(muted);
+
+    // The overlay duplicates this control for fullscreen, where the real bar is off-screen.
+    el.overlayMicIcon.setAttribute('href', `/assets/icons.svg#${muted ? 'mic-off' : 'mic'}`);
+    text(el.overlayMicLabel, muted ? UI.unmute : UI.mute);
+    cls(el.overlayMic, 'ctl--off', muted);
+    el.overlayMic.dataset.micMuted = String(muted);
 
     // Only the host may end the session for everyone.
     show(el.endSession, self.isHost);
@@ -398,7 +416,9 @@ export function createRoomView({ store, bus, EVENTS }) {
         h('div', { class: 'stats__name' }, peer.name),
         h('div', { class: 'stats__grid' }, [
           row(UI.statsSending, fmtBitrate(s?.sendBps), 'stat-send'),
+          row(UI.statsMicSending, micSendingLabel(s), 'stat-mic-send'),
           row(UI.statsReceiving, fmtBitrate(s?.recvBps), 'stat-bitrate'),
+          row(UI.statsAudioReceiving, fmtBitrate(s?.audioRecvBps), 'stat-audio-recv'),
           row(
             UI.statsResolution,
             s?.recvWidth ? `${s.recvWidth}x${s.recvHeight}` : '—',
@@ -432,6 +452,26 @@ export function createRoomView({ store, bus, EVENTS }) {
       h('span', { class: 'stats__key' }, key),
       h('span', { class: 'stats__val', dataset: { testid } }, value ?? '—'),
     ];
+  }
+
+  /**
+   * Why the far end cannot hear you, narrowed to an answer you can act on.
+   *
+   * The distinction that matters is **whether a microphone is attached to this connection at
+   * all**. No outbound audio report means it is not, which is a fault and was previously
+   * invisible from either end. A report means it is, and the number is what is leaving.
+   *
+   * Mute is reported from local state rather than inferred from the bitrate, because muting
+   * here is `track.enabled = false`: the RTP session deliberately stays up and keeps sending
+   * silence -- measured at around 14 kbps. A muted microphone therefore looks almost exactly
+   * like a quiet one on the wire, which is precisely why the `mute-state` message has to exist
+   * at all, and why guessing from traffic would be wrong.
+   */
+  function micSendingLabel(sample) {
+    if (!sample) return '—';
+    if (!sample.hasMicSender) return UI.statsMicNotSent;
+    const rate = fmtBitrate(sample.micSendBps);
+    return store.state.self.micMuted ? `${rate} — ${UI.statsMicMuted}` : rate;
   }
 
   function connectionLabel(kind) {
@@ -553,7 +593,104 @@ export function createRoomView({ store, bus, EVENTS }) {
     renderStats();
   });
 
+  // ---------------------------------------------------------------------------
+  // Microphone level
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Paint a 0..1 level onto a bar.
+   *
+   * The amber state is the useful one: the meter is fed a clone of the track that stays enabled
+   * while muted, so a bar moving in amber is the app saying "you are talking and nobody can
+   * hear you" -- which is the exact situation that prompted all of this.
+   */
+  function paintMeter(bar, level, { muted = false, dead = false } = {}) {
+    if (!bar) return;
+    // A gentle curve: speech sits low in a linear scale and the bar would barely move.
+    const shown = dead ? 0 : Math.min(100, Math.round(Math.sqrt(Math.max(0, level)) * 130));
+    bar.style.width = `${shown}%`;
+    cls(bar, 'meter__fill--muted', muted && !dead);
+    cls(bar, 'meter__fill--dead', dead);
+  }
+
+  function setLobbyMicLevel(level, { dead = false } = {}) {
+    paintMeter(el.lobbyMeter, level, { dead });
+  }
+
+  function setLobbyMicStatus(message) {
+    text(el.lobbyMicStatus, String(message ?? ''));
+  }
+
+  function setStageMicLevel(level) {
+    paintMeter(el.overlayMeter, level, { muted: store.state.self.micMuted });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Fullscreen
+  // ---------------------------------------------------------------------------
+
+  /** Idle-hide for the overlay, so it does not sit over the picture while nobody needs it. */
+  let overlayIdleTimer = null;
+
+  function isFullscreen() {
+    return document.fullscreenElement === el.stage;
+  }
+
+  async function toggleFullscreen() {
+    try {
+      if (isFullscreen()) await document.exitFullscreen();
+      // The CONTAINER, not the <video>: fullscreening the element itself replaces everything
+      // with a bare video surface and loses the label and these controls with it.
+      else await el.stage.requestFullscreen();
+    } catch {
+      // Refused (no user gesture, or a policy blocks it). The fullscreenchange handler is the
+      // only thing that updates the button, so a refusal simply leaves it where it was.
+    }
+  }
+
+  function nudgeOverlay() {
+    if (!isFullscreen()) return;
+    cls(el.stageOverlay, 'stage__overlay--idle', false);
+    clearTimeout(overlayIdleTimer);
+    overlayIdleTimer = setTimeout(() => {
+      cls(el.stageOverlay, 'stage__overlay--idle', true);
+    }, 2600);
+  }
+
+  // Driven by the event rather than by the request resolving, so Escape and the window manager
+  // leave the button telling the truth.
+  document.addEventListener('fullscreenchange', () => {
+    const on = isFullscreen();
+    show(el.stageOverlay, on);
+    cls(el.fullscreenToggle, 'btn--active', on);
+    text(el.fullscreenLabel, on ? UI.exitFullscreen : UI.fullscreen);
+    clearTimeout(overlayIdleTimer);
+    if (on) nudgeOverlay();
+    else cls(el.stageOverlay, 'stage__overlay--idle', false);
+  });
+
+  el.stage.addEventListener('mousemove', nudgeOverlay);
+  el.stage.addEventListener('touchstart', nudgeOverlay, { passive: true });
+
+  el.fullscreenToggle.addEventListener('click', () => void toggleFullscreen());
+  el.overlayExit.addEventListener('click', () => void toggleFullscreen());
+  el.overlayMic.addEventListener('click', () => bus.emit(EVENTS.INTENT_TOGGLE_MIC));
+
+  // Where people actually try first.
+  el.stageVideo.addEventListener('dblclick', () => void toggleFullscreen());
+
+  document.addEventListener('keydown', (event) => {
+    // Not while typing a name or an access code.
+    const tag = document.activeElement?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    if (event.key === 'f' || event.key === 'F') {
+      event.preventDefault();
+      void toggleFullscreen();
+    }
+  });
+
   function destroy() {
+    clearTimeout(overlayIdleTimer);
     clearInterval(sessionTimer);
     for (const [peerId] of audioElements) removePeerMedia(peerId);
   }
@@ -573,6 +710,11 @@ export function createRoomView({ store, bus, EVENTS }) {
     attachRemoteAudio,
     removePeerMedia,
     removeAllPeerMedia,
+    setLobbyMicLevel,
+    setLobbyMicStatus,
+    setStageMicLevel,
+    toggleFullscreen,
+    isFullscreen,
     renderAll() {
       renderSelfControls();
       renderShareControl();

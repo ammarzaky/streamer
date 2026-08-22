@@ -19,15 +19,27 @@ const overrides = {
   STREAMER_HOST_GRACE_MS: ['rooms.hostGraceMs', Number],
   STREAMER_SHARE_REVOKE_TIMEOUT_MS: ['rooms.shareRevokeTimeoutMs', Number],
   STREAMER_EMPTY_ROOM_GRACE_MS: ['rooms.emptyRoomGraceMs', Number],
+  // Read by scripts/make-certs.mjs too, so that the directory the certificates are WRITTEN to
+  // and the one createHttpsServer READS them from can never drift apart. The packaged desktop
+  // app points it at userData; an absolute value survives path.resolve(cwd, ...) unchanged.
+  STREAMER_CERT_DIR: ['tls.certDir', String],
 };
 function bool(v) { return v === '1' || v.toLowerCase() === 'true'; }
 function list(v) { return v.split(',').map((x) => x.trim()).filter(Boolean); }
 function setPath(obj, dotted, value) { const parts = dotted.split('.'); const last = parts.pop(); let at = obj; for (const p of parts) at = at[p] ??= {}; at[last] = value; }
 
-export async function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
+/**
+ * `overridesDir` exists for the packaged desktop app, and defaults to `cwd` everywhere else.
+ *
+ * Shipped defaults and user overrides normally sit side by side, but in a packaged Electron app
+ * the application directory is read-only -- so config.default.json is read from the bundle while
+ * config.json has to come from the writable userData directory. Splitting the two lookups is the
+ * whole change; every other caller passes neither and behaves exactly as before.
+ */
+export async function loadConfig({ cwd = process.cwd(), env = process.env, overridesDir = cwd } = {}) {
   const defaults = JSON.parse(await readFile(path.join(cwd, 'config.default.json'), 'utf8'));
   let local = {};
-  try { local = JSON.parse(await readFile(path.join(cwd, 'config.json'), 'utf8')); }
+  try { local = JSON.parse(await readFile(path.join(overridesDir, 'config.json'), 'utf8')); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   const config = deepMerge(defaults, local);
   for (const [name, [key, convert]] of Object.entries(overrides)) if (env[name] !== undefined) setPath(config, key, convert(env[name]));

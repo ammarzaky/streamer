@@ -1,0 +1,93 @@
+.home {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 48px 32px 32px;
+}
+
+.home__head {
+  margin-bottom: 28px;
+}
+
+.home__head p {
+  max-width: 52ch;
+}
+
+.home__cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+/* Below this the two cards become unreadably narrow before they become short. */
+@media (max-width: 720px) {
+  .home__cards {
+    grid-template-columns: 1fr;
+  }
+}
+
+.home__cards .card {
+  display: flex;
+  flex-direction: column;
+  min-height: 200px;
+}
+
+.home__cards .card p {
+  flex: 1;
+}
+
+.home__join-row {
+  margin-top: 10px;
+}
+
+.home__join-row .muted {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home__foot {
+  margin-top: 28px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-1);
+  max-width: 62ch;
+}
+
+/* ---------------------------------------------------------------------------
+ * Update strip
+ *
+ * Quiet by default. It shows which build is running -- so "which version are you on" is never
+ * a question asked over chat -- and only grows a button when there is genuinely something to do.
+ * ------------------------------------------------------------------------ */
+
+.update {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-1);
+  border-radius: 8px;
+  background: var(--surface-1);
+  font-size: 12.5px;
+}
+
+.update__msg {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update button {
+  flex: none;
+  padding: 5px 12px;
+  font-size: 12.5px;
+}
+
+.update button[hidden] {
+  display: none;
+}

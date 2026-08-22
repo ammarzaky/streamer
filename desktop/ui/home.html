@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      A local page, so the CSP can be as tight as it gets: no remote anything, no inline script,
+      no eval. The only images are data: URIs from the source picker's thumbnails.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'"
+    />
+    <title>Streamer</title>
+    <link rel="stylesheet" href="shell.css" />
+    <link rel="stylesheet" href="home.css" />
+  </head>
+  <body>
+    <main class="home">
+      <header class="home__head">
+        <h1>Streamer</h1>
+        <p>Private screen sharing. Media goes straight between you and the people you invite.</p>
+      </header>
+
+      <div class="home__cards">
+        <section class="card" data-testid="host-card">
+          <h2>Host</h2>
+          <p>Run the room on this machine and invite people to it.</p>
+          <button class="primary" id="host" data-testid="host-button">Start a room</button>
+          <div class="message info" id="host-note" hidden></div>
+        </section>
+
+        <section class="card" data-testid="join-card">
+          <h2>Join</h2>
+          <p>Paste the link you were sent.</p>
+          <input
+            type="text"
+            id="link"
+            data-testid="join-input"
+            placeholder="streamer://join?… or https://…"
+            spellcheck="false"
+            autocomplete="off"
+          />
+          <div class="row home__join-row">
+            <button class="primary" id="join" data-testid="join-button" disabled>Join</button>
+            <span class="muted" id="preview" data-testid="join-preview"></span>
+          </div>
+        </section>
+      </div>
+
+      <div class="message error" id="error" data-testid="home-error" hidden></div>
+
+      <section class="update" id="update" data-testid="update-panel">
+        <span class="muted" id="update-version" data-testid="update-version">Streamer</span>
+        <span class="muted update__msg" id="update-msg" data-testid="update-status"></span>
+        <button id="update-action" data-testid="update-action" hidden></button>
+      </section>
+
+      <footer class="home__foot">
+        <span class="muted">
+          Opening a room from outside your network needs a public address and a forwarded port.
+          Nothing here can change that.
+        </span>
+      </footer>
+    </main>
+
+    <script type="module" src="home.js"></script>
+  </body>
+</html>

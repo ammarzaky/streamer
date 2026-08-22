@@ -8,7 +8,33 @@ No accounts, no analytics, no recording, no database.
 
 ---
 
-## Quick start
+There are two ways to run it: a **desktop app** for Windows, or a **browser** against a server you
+start yourself. Both talk to each other — one person can be in the app while another is in Chrome.
+
+## Quick start — desktop app (recommended)
+
+```bash
+npm install
+npm run app          # run it
+npm run build        # or build an installer into dist/
+```
+
+Press **Start a room**, then send the link the room panel shows you.
+
+- **On the same network**, the `streamer://` link carries the fingerprint of your server's
+  certificate, so the app trusts that one certificate and nothing else — **nothing to install, no
+  warning to dismiss.**
+- **From anywhere else**, switch on **Open a public link over Cloudflare**. It works on networks
+  you do not administer, needs no port forwarding and no firewall rule, and arrives with a real
+  certificate. Only signalling goes through Cloudflare; audio and video stay peer-to-peer.
+
+The app also replaces Chrome's screen picker with its own and captures system audio without anyone
+having to remember a checkbox.
+
+Full detail, including the SmartScreen warning on the unsigned installer:
+[docs/DESKTOP.md](docs/DESKTOP.md).
+
+## Quick start — browser
 
 ```bash
 npm install
@@ -29,6 +55,10 @@ npm run links
 
 That prints the address to send them, the certificate fingerprint they can check it against,
 and what would need to change for someone outside your network to join.
+
+**Neither option changes the networking.** Reaching your machine from another network still needs
+a public address and an open port — read [docs/NETWORK.md](docs/NETWORK.md) before assuming
+otherwise.
 
 ---
 
@@ -149,9 +179,12 @@ which networks (CGNAT, symmetric NAT, most mobile carriers) simply cannot do it 
 ## Requirements
 
 - **Node.js 20.11+** (developed on 24)
-- **OpenSSL** — ships with Git for Windows; found automatically
-- **Chrome, Edge, or Firefox on a desktop.** Screen sharing does not exist in mobile browsers;
-  phones and tablets can watch and talk but cannot share.
+- **Chrome, Edge, or Firefox on a desktop**, if you are using the browser rather than the app.
+  Screen sharing does not exist in mobile browsers; phones and tablets can watch and talk but
+  cannot share.
+- **Nothing else.** Certificates are generated in-process — no OpenSSL, no Git install. That
+  matters because anyone can host a room from the desktop app, and "hosting requires a developer
+  toolchain" is not a requirement that can travel with an installer.
 
 ---
 

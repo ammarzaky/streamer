@@ -7,3 +7,5 @@ scratchpad/
 *.log
 .DS_Store
 Thumbs.db
+dist/
+dist-next/

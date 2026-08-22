@@ -65,8 +65,16 @@ export function attachSignaling(server, config, log = console) {
     registry.removePeer(meta.room, meta.peer, { reason, send, broadcast });
   };
 
+  // Origins trusted at runtime, on top of the frozen config list. Populated when a tunnel is
+  // opened, since its hostname does not exist until then.
+  const allowedOrigins = new Set();
+  const toOrigin = (value) => {
+    if (typeof value !== 'string' || !value) return null;
+    try { return new URL(value).origin; } catch { return null; }
+  };
+
   const upgrade = (request, socket, head) => {
-    if (!acceptsUpgrade(request, config)) return rejectUpgrade(socket);
+    if (!acceptsUpgrade(request, config, allowedOrigins)) return rejectUpgrade(socket);
     wss.handleUpgrade(request, socket, head, (ws) => wss.emit('connection', ws, request));
   };
   server.on('upgrade', upgrade);
@@ -159,6 +167,24 @@ export function attachSignaling(server, config, log = console) {
   return {
     wss,
     registry,
+    /**
+     * Trust an origin discovered after startup, such as a tunnel hostname.
+     *
+     * Normalised to scheme+host, because the caller has a full URL to hand while the Origin header
+     * carries only the origin -- comparing those as raw strings would never match, and the failure
+     * would look identical to never having called this at all.
+     *
+     * Unparseable input is ignored rather than thrown: this is fed whatever an external tool
+     * reported, and a throw here would surface as a tunnel failure for entirely the wrong reason.
+     */
+    allowOrigin(origin) {
+      const value = toOrigin(origin);
+      if (value) allowedOrigins.add(value);
+    },
+    forgetOrigin(origin) {
+      const value = toOrigin(origin);
+      if (value) allowedOrigins.delete(value);
+    },
     close(code = CLOSE.SERVER_SHUTDOWN) {
       stopHeartbeat();
       stopJanitor();

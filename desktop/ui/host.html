@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'"
+    />
+    <title>Room details</title>
+    <link rel="stylesheet" href="shell.css" />
+    <link rel="stylesheet" href="host.css" />
+  </head>
+  <body>
+    <main class="host">
+      <section class="host__status" data-testid="host-status">
+        <span class="dot" id="dot"></span>
+        <span id="status-text">Starting…</span>
+        <span class="muted" id="participants" data-testid="participant-count"></span>
+      </section>
+
+      <section class="host__block">
+        <h2>Invite</h2>
+        <p class="muted">
+          Send the app link to anyone using Streamer. It carries this server’s certificate, so they
+          join with no warning and nothing to install.
+        </p>
+        <div id="links" data-testid="invite-links"></div>
+      </section>
+
+      <section class="host__block">
+        <h2>Reaching this room from outside</h2>
+
+        <label class="check">
+          <input type="checkbox" id="tunnel" data-testid="tunnel-toggle" />
+          <span>Open a public link over Cloudflare</span>
+        </label>
+        <div class="message info" id="tunnel-note" data-testid="tunnel-note" hidden></div>
+        <p class="muted">
+          Works on any network, including guest Wi-Fi and connections you don’t administer — it
+          dials out, so nothing needs a forwarded port or a firewall rule. Only signalling goes
+          through Cloudflare; audio and video still go straight between you. The address changes
+          each time you switch it on, so send the new link each session.
+        </p>
+
+        <label class="check host__upnp">
+          <input type="checkbox" id="upnp" data-testid="upnp-toggle" />
+          <span>Ask the router to open port <span id="port">…</span> (own router only)</span>
+        </label>
+        <div class="message info" id="upnp-note" data-testid="upnp-note" hidden></div>
+        <p class="muted">
+          Only useful on a router you control. On guest or office Wi-Fi there is nothing to ask,
+          and it cannot help behind carrier-grade NAT either. Use the tunnel above instead.
+        </p>
+      </section>
+
+      <section class="host__block">
+        <h2>Certificate</h2>
+        <p class="muted">
+          Browser participants will see a warning and must accept this fingerprint by hand. People
+          using the app do not — it is already in their link.
+        </p>
+        <code class="mono" id="fingerprint" data-testid="fingerprint">…</code>
+      </section>
+
+      <section class="host__block host__block--last">
+        <h2>If someone cannot connect</h2>
+        <p class="muted">
+          Windows Firewall is set up by the installer, but a third-party antivirus with its own
+          firewall — Avast, Kaspersky, Norton — blocks incoming connections independently and has
+          to be allowed separately. That is the usual cause when the address is right and nothing
+          loads.
+        </p>
+      </section>
+
+      <footer class="host__foot">
+        <button class="danger" id="stop" data-testid="stop-hosting">End the room</button>
+      </footer>
+    </main>
+
+    <script type="module" src="host.js"></script>
+  </body>
+</html>

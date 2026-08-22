@@ -43,6 +43,20 @@
             <p id="name-error" class="field__error" hidden></p>
           </div>
 
+          <!-- The microphone check. Placed before the join button on purpose: this is the
+               last moment a dead or blocked microphone can be fixed without an audience. -->
+          <div class="field">
+            <span class="field__label">Microphone</span>
+            <div class="miccheck" data-testid="lobby-mic-check">
+              <div class="meter" role="img" aria-label="Microphone level">
+                <div class="meter__fill" id="lobby-meter-fill" data-testid="lobby-meter"></div>
+              </div>
+              <p class="field__hint" id="lobby-mic-status" data-testid="lobby-mic-status">
+                Checking…
+              </p>
+            </div>
+          </div>
+
           <div class="field" id="access-code-field" hidden>
             <label class="field__label" for="access-code">Access code</label>
             <input id="access-code" class="input" type="text" autocomplete="off" />
@@ -119,6 +133,27 @@
           ></video>
 
           <div id="stage-label" class="stage__label" hidden></div>
+
+          <!-- Fullscreen puts #stage alone on the screen, and the real control bar is outside
+               it. Without these the user would be stranded with no way to mute or get out
+               except a keyboard shortcut they have not been told about. Auto-hides. -->
+          <div id="stage-overlay" class="stage__overlay" data-testid="stage-overlay" hidden>
+            <button id="overlay-mic" class="ctl ctl--sm" type="button" data-testid="overlay-mic">
+              <svg class="btn__icon" aria-hidden="true" focusable="false">
+                <use href="/assets/icons.svg#mic" id="overlay-mic-icon"></use>
+              </svg>
+              <span id="overlay-mic-label">Mute</span>
+            </button>
+            <div class="meter meter--overlay">
+              <div class="meter__fill" id="overlay-meter-fill" data-testid="overlay-meter"></div>
+            </div>
+            <button id="overlay-exit" class="ctl ctl--sm" type="button" data-testid="overlay-exit">
+              <svg class="btn__icon" aria-hidden="true" focusable="false">
+                <use href="/assets/icons.svg#fullscreen"></use>
+              </svg>
+              <span>Exit fullscreen</span>
+            </button>
+          </div>
         </main>
 
         <aside class="roster">
@@ -174,6 +209,19 @@
             </button>
             <div id="quality-menu" class="quality" role="radiogroup" hidden></div>
           </div>
+
+          <button
+            id="fullscreen-toggle"
+            class="btn btn--ghost btn--sm"
+            type="button"
+            data-testid="fullscreen-toggle"
+            title="Fullscreen (F)"
+          >
+            <svg class="btn__icon" aria-hidden="true" focusable="false">
+              <use href="/assets/icons.svg#fullscreen" id="fullscreen-icon"></use>
+            </svg>
+            <span id="fullscreen-label">Fullscreen</span>
+          </button>
 
           <button id="stats-toggle" class="btn btn--ghost btn--sm" type="button" data-testid="stats-toggle">
             <svg class="btn__icon" aria-hidden="true" focusable="false">

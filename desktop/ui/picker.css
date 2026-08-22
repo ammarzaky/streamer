@@ -1,0 +1,116 @@
+.picker {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 20px 22px;
+}
+
+.picker__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.picker__head h1 {
+  font-size: 17px;
+}
+
+.picker__tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.picker__tabs button {
+  padding: 6px 14px;
+  font-size: 13px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-2);
+}
+
+.picker__tabs button.is-active {
+  background: var(--surface-2);
+  border-color: var(--line-2);
+  color: var(--text-1);
+}
+
+.picker__grid {
+  flex: 1;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 12px;
+  align-content: start;
+  padding: 2px;
+}
+
+.source {
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  padding: 8px;
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.source:hover {
+  background: var(--surface-2);
+}
+
+.source[aria-selected='true'] {
+  border-color: var(--accent);
+  outline: 1px solid var(--accent);
+}
+
+.source__thumb {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  /* True black behind the thumbnail: a grey backing makes a dark desktop preview look like a
+     rendering failure rather than a dark desktop. */
+  background: #000;
+  border-radius: 6px;
+  display: block;
+}
+
+.source__name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source__icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.picker__empty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+}
+
+.picker__empty[hidden] {
+  display: none;
+}
+
+.picker__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 14px;
+  margin-top: 14px;
+  border-top: 1px solid var(--line-1);
+}

@@ -1,0 +1,74 @@
+appId: dev.streamer.app
+productName: Streamer
+copyright: ''
+
+directories:
+  output: dist
+  buildResources: build
+
+# --- Why asar is off ---------------------------------------------------------
+# The static file server resolves the public/ root with fs.realpath and then refuses any request
+# whose resolved path escapes it. That check is a security control, not a convenience, and inside
+# an asar archive it runs against a virtual filesystem whose realpath semantics are not the ones
+# it was written and tested against. A subtly wrong path-traversal guard is a bad trade for a
+# slightly smaller install directory.
+asar: false
+
+files:
+  - src/**/*
+  - public/**/*
+  - desktop/**/*
+  - scripts/make-certs.mjs
+  - config.default.json
+  - package.json
+  - '!**/*.map'
+  - '!test/**'
+  - '!test-results/**'
+  - '!certs/**' # generated per machine into userData; shipping one would be a shared private key
+
+# Where updates come from.
+#
+# A PUBLIC repository on purpose: electron-updater reads public releases with no credentials,
+# so nothing is embedded in the app and there is no token to leak by shipping it. A private
+# repo would require baking a GitHub token into every installer, which trades the repo's
+# privacy for the app's -- a bad deal.
+#
+# Publish with:  GH_TOKEN=... npx electron-builder --win --publish always
+# The token lives in the build environment only and never enters the artifact.
+#
+# Renaming this repo later breaks the update feed for anyone still running an older build.
+publish:
+  provider: github
+  owner: ammarzaky
+  repo: streamer
+
+# The invite links depend on this. Without the protocol registration a streamer:// link opens
+# nothing and the only route in is pasting the address by hand.
+protocols:
+  - name: Streamer room invite
+    schemes:
+      - streamer
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+
+# Each target names its own artifact. A single win.artifactName applies to both, and since both
+# produce a .exe the second build silently overwrites the first -- leaving one file where you
+# expected two, with no error and no way to tell which one survived.
+nsis:
+  artifactName: ${productName}-Setup-${version}-${arch}.${ext}
+  oneClick: false
+  perMachine: false # per-user, so the installer needs no administrator rights
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Streamer
+  include: build/installer.nsh
+  deleteAppDataOnUninstall: false # certificates live there; keep them across a reinstall
+
+portable:
+  artifactName: ${productName}-Portable-${version}-${arch}.${ext}

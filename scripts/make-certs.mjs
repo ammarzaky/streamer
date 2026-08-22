@@ -9,72 +9,63 @@
  * Why a local CA instead of a bare self-signed certificate: a self-signed leaf must be trusted
  * on every device individually, and mobile browsers make that deliberately awkward. With a CA,
  * you install ONE file (certs/ca.crt) per device and every future leaf is trusted automatically
- * -- including after the LAN IP changes and the leaf is reissued.
+ * -- including after the LAN IP changes and the leaf is reissued. The desktop app skips this
+ * entirely by pinning the leaf's fingerprint, but browser participants still rely on it.
+ *
+ * **Why this generates certificates in-process rather than shelling out to OpenSSL.** It used
+ * to run `openssl`, found on PATH or inside a Git for Windows install. That is fine on a
+ * developer machine and a hard blocker anywhere else: once any participant can host a room from
+ * a packaged app, "hosting requires Git to be installed" is not a constraint we can ship. There
+ * is no OpenSSL fallback on purpose -- two code paths for something this security-relevant means
+ * the one you do not use daily is the one that is broken when you need it.
  *
  *   node scripts/make-certs.mjs            generate if missing or stale
  *   node scripts/make-certs.mjs --force    regenerate unconditionally
  *   node scripts/make-certs.mjs --check    verify only; exit 1 if regeneration is needed
  */
 
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
-import { networkInterfaces, tmpdir } from 'node:os';
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { networkInterfaces } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { X509Certificate } from 'node:crypto';
+import { X509Certificate, generateKeyPairSync, randomBytes } from 'node:crypto';
+import forge from 'node-forge';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const CERT_DIR = join(ROOT, 'certs');
-
-const CA_KEY = join(CERT_DIR, 'ca.key');
-const CA_CRT = join(CERT_DIR, 'ca.crt');
-const SRV_KEY = join(CERT_DIR, 'server.key');
-const SRV_CRT = join(CERT_DIR, 'server.crt');
 
 const CA_DAYS = 3650; // 10 years -- you install this once and forget it.
 const LEAF_DAYS = 825; // Browsers reject server certificates valid for longer than ~825 days.
 const RENEW_WITHIN_DAYS = 30;
+const KEY_BITS = 2048;
 
 const EXTRA_DNS = ['localhost', 'streamer.local'];
 
 // ---------------------------------------------------------------------------
-// OpenSSL discovery
+// Where the certificates live
 // ---------------------------------------------------------------------------
 
-const OPENSSL_CANDIDATES = [
-  process.env.STREAMER_OPENSSL,
-  'openssl',
-  'C:\\Program Files\\Git\\mingw64\\bin\\openssl.exe',
-  'C:\\Program Files\\Git\\usr\\bin\\openssl.exe',
-  'C:\\Program Files (x86)\\Git\\mingw64\\bin\\openssl.exe',
-  'C:\\Windows\\System32\\OpenSSH\\openssl.exe',
-].filter(Boolean);
-
-export function resolveOpenssl() {
-  for (const candidate of OPENSSL_CANDIDATES) {
-    try {
-      execFileSync(candidate, ['version'], { stdio: 'pipe' });
-      return candidate;
-    } catch {
-      // Try the next candidate.
-    }
-  }
-  throw new Error(
-    'OpenSSL was not found.\n' +
-      'It ships with Git for Windows at:\n' +
-      '  C:\\Program Files\\Git\\mingw64\\bin\\openssl.exe\n' +
-      'Install Git for Windows, or set STREAMER_OPENSSL to the full path of openssl.exe.',
-  );
+/**
+ * Resolved on every call rather than once at import.
+ *
+ * A packaged Electron app runs from inside `resources/app.asar`, which is read-only, so it
+ * points this at `app.getPath('userData')` instead. Reading the variable lazily means the main
+ * process can set it before starting the server without having to control module import order
+ * -- an ESM import is hoisted, so a constant captured at import time would already be wrong.
+ */
+export function certDir() {
+  return process.env.STREAMER_CERT_DIR ? resolve(process.env.STREAMER_CERT_DIR) : join(ROOT, 'certs');
 }
 
-function openssl(bin, args, opts = {}) {
-  try {
-    return execFileSync(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], ...opts });
-  } catch (err) {
-    const stderr = err.stderr ? err.stderr.toString() : '';
-    throw new Error(`openssl ${args[0]} failed:\n${stderr || err.message}`);
-  }
-}
+const paths = () => {
+  const dir = certDir();
+  return {
+    dir,
+    caKey: join(dir, 'ca.key'),
+    caCrt: join(dir, 'ca.crt'),
+    srvKey: join(dir, 'server.key'),
+    srvCrt: join(dir, 'server.crt'),
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Network addresses
@@ -93,10 +84,7 @@ export function lanIPv4s() {
 
 function desiredSans() {
   const ips = ['127.0.0.1', '::1', ...lanIPv4s()];
-  return {
-    dns: EXTRA_DNS,
-    ip: [...new Set(ips)],
-  };
+  return { dns: EXTRA_DNS, ip: [...new Set(ips)] };
 }
 
 function sanString({ dns, ip }) {
@@ -104,7 +92,7 @@ function sanString({ dns, ip }) {
 }
 
 /**
- * OpenSSL writes "IP:::1" but Node reads it back as "IP Address:0:0:0:0:0:0:0:1".
+ * Certificates store "::1" but Node reads it back as "IP Address:0:0:0:0:0:0:0:1".
  * Without expanding the compressed form, --check reports a missing SAN on every run and the
  * certificate is regenerated forever.
  */
@@ -128,12 +116,13 @@ function normalizeIp(ip) {
  * Used by both the generator (should I rebuild?) and --check (should this fail the build?).
  */
 export function certProblem() {
-  if (!existsSync(CA_CRT) || !existsSync(CA_KEY)) return 'no local CA yet';
-  if (!existsSync(SRV_CRT) || !existsSync(SRV_KEY)) return 'no server certificate yet';
+  const p = paths();
+  if (!existsSync(p.caCrt) || !existsSync(p.caKey)) return 'no local CA yet';
+  if (!existsSync(p.srvCrt) || !existsSync(p.srvKey)) return 'no server certificate yet';
 
   let cert;
   try {
-    cert = new X509Certificate(readFileSync(SRV_CRT));
+    cert = new X509Certificate(readFileSync(p.srvCrt));
   } catch (err) {
     return `server certificate is unreadable (${err.message})`;
   }
@@ -169,7 +158,8 @@ export function certProblem() {
   return null;
 }
 
-export function fingerprint(certPath = SRV_CRT) {
+/** SHA-256 of the server certificate, in OpenSSL's colon-separated hex form. */
+export function fingerprint(certPath = paths().srvCrt) {
   return new X509Certificate(readFileSync(certPath)).fingerprint256;
 }
 
@@ -177,54 +167,127 @@ export function fingerprint(certPath = SRV_CRT) {
 // Generation
 // ---------------------------------------------------------------------------
 
-function generateCA(bin) {
-  console.log('  creating local certificate authority (10 years)');
-  openssl(bin, [
-    'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256',
-    '-nodes', '-days', String(CA_DAYS), '-sha256',
-    '-keyout', CA_KEY, '-out', CA_CRT,
-    '-subj', '/CN=Streamer Local CA/O=Streamer',
-    '-addext', 'basicConstraints=critical,CA:TRUE,pathlen:0',
-    '-addext', 'keyUsage=critical,keyCertSign,cRLSign',
-  ]);
+/**
+ * An RSA keypair, generated by Node and handed to forge.
+ *
+ * forge can generate keys itself, but in pure JavaScript a 2048-bit RSA keygen takes seconds --
+ * and we need two. Node's native implementation does it in milliseconds, and forge is perfectly
+ * happy to import the result, so it only has to do the part it is actually needed for: building
+ * and signing the certificate structure.
+ *
+ * RSA rather than the EC P-256 the OpenSSL version used, because forge cannot generate or sign
+ * with EC keys. For a certificate that exists to satisfy the secure-context rule on a private
+ * network, 2048-bit RSA is not the weak link.
+ */
+function keypair() {
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', {
+    modulusLength: KEY_BITS,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+  });
+  return {
+    privatePem: privateKey,
+    forgePrivate: forge.pki.privateKeyFromPem(privateKey),
+    forgePublic: forge.pki.publicKeyFromPem(publicKey),
+  };
 }
 
-function generateLeaf(bin, sans) {
-  console.log(`  issuing server certificate for ${sanString(sans)}`);
+/**
+ * A positive serial number.
+ *
+ * X.509 serials are signed integers, so a value whose leading byte has the high bit set is read
+ * as negative -- which some clients reject outright. The '00' prefix keeps it positive.
+ */
+const serial = () => `00${randomBytes(16).toString('hex')}`;
 
-  const csr = join(CERT_DIR, 'server.csr');
-  const extFile = join(tmpdir(), `streamer-ext-${process.pid}.cnf`);
+function validity(days) {
+  const notBefore = new Date();
+  // Backdated an hour so a client whose clock is slightly behind ours does not reject a
+  // certificate that was, from its point of view, issued in the future.
+  notBefore.setHours(notBefore.getHours() - 1);
+  const notAfter = new Date(notBefore);
+  notAfter.setDate(notAfter.getDate() + days);
+  return { notBefore, notAfter };
+}
 
-  // Written to a real temp file rather than piped: process substitution does not exist
-  // outside a POSIX shell, and this script must work from cmd.exe and PowerShell too.
-  writeFileSync(
-    extFile,
-    [
-      `subjectAltName=${sanString(sans)}`,
-      'basicConstraints=CA:FALSE',
-      'keyUsage=critical,digitalSignature,keyEncipherment',
-      'extendedKeyUsage=serverAuth',
-      '',
-    ].join('\n'),
-  );
+function generateCA() {
+  const keys = keypair();
+  const cert = forge.pki.createCertificate();
+  const { notBefore, notAfter } = validity(CA_DAYS);
 
+  cert.publicKey = keys.forgePublic;
+  cert.serialNumber = serial();
+  cert.validity.notBefore = notBefore;
+  cert.validity.notAfter = notAfter;
+
+  const attrs = [
+    { name: 'commonName', value: 'Streamer Local CA' },
+    { name: 'organizationName', value: 'Streamer' },
+  ];
+  cert.setSubject(attrs);
+  cert.setIssuer(attrs); // self-signed
+  cert.setExtensions([
+    { name: 'basicConstraints', critical: true, cA: true, pathLenConstraint: 0 },
+    { name: 'keyUsage', critical: true, keyCertSign: true, cRLSign: true },
+    { name: 'subjectKeyIdentifier' },
+  ]);
+
+  cert.sign(keys.forgePrivate, forge.md.sha256.create());
+  return { keyPem: keys.privatePem, certPem: forge.pki.certificateToPem(cert) };
+}
+
+function generateLeaf(ca, sans) {
+  const keys = keypair();
+  const cert = forge.pki.createCertificate();
+  const { notBefore, notAfter } = validity(LEAF_DAYS);
+
+  cert.publicKey = keys.forgePublic;
+  cert.serialNumber = serial();
+  cert.validity.notBefore = notBefore;
+  cert.validity.notAfter = notAfter;
+
+  cert.setSubject([
+    { name: 'commonName', value: 'streamer.local' },
+    { name: 'organizationName', value: 'Streamer' },
+  ]);
+  cert.setIssuer(ca.cert.subject.attributes);
+  cert.setExtensions([
+    { name: 'basicConstraints', cA: false },
+    { name: 'keyUsage', critical: true, digitalSignature: true, keyEncipherment: true },
+    { name: 'extKeyUsage', serverAuth: true },
+    {
+      name: 'subjectAltName',
+      // forge's altName type numbers: 2 = dNSName, 7 = iPAddress.
+      altNames: [
+        ...sans.dns.map((value) => ({ type: 2, value })),
+        ...sans.ip.map((ip) => ({ type: 7, ip })),
+      ],
+    },
+  ]);
+
+  cert.sign(ca.key, forge.md.sha256.create());
+  return { keyPem: keys.privatePem, certPem: forge.pki.certificateToPem(cert) };
+}
+
+/**
+ * Load the existing CA so a new leaf can be signed with it, or null if it cannot be used.
+ *
+ * Returning null rather than throwing is what makes the migration off OpenSSL invisible: the CA
+ * this project used to generate has an EC key, and forge cannot sign with one. Rather than
+ * failing on a machine that has been running fine for months, we treat an unusable CA as an
+ * absent one and issue a fresh pair. The only cost is that browser participants re-install
+ * ca.crt once -- which the desktop app does not need at all.
+ */
+function loadCA() {
+  const p = paths();
+  if (!existsSync(p.caCrt) || !existsSync(p.caKey)) return null;
   try {
-    openssl(bin, [
-      'req', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes',
-      '-keyout', SRV_KEY, '-out', csr,
-      '-subj', '/CN=streamer.local/O=Streamer',
-    ]);
-
-    openssl(bin, [
-      'x509', '-req', '-in', csr,
-      '-CA', CA_CRT, '-CAkey', CA_KEY, '-CAcreateserial',
-      '-days', String(LEAF_DAYS), '-sha256',
-      '-extfile', extFile,
-      '-out', SRV_CRT,
-    ]);
-  } finally {
-    rmSync(extFile, { force: true });
-    rmSync(csr, { force: true });
+    return {
+      key: forge.pki.privateKeyFromPem(readFileSync(p.caKey, 'utf8')),
+      cert: forge.pki.certificateFromPem(readFileSync(p.caCrt, 'utf8')),
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -233,27 +296,37 @@ function generateLeaf(bin, sans) {
  * Safe to call on every server start -- it does nothing when the certificates are healthy.
  */
 export function ensureCertificates({ force = false, quiet = false } = {}) {
-  mkdirSync(CERT_DIR, { recursive: true });
+  const p = paths();
+  mkdirSync(p.dir, { recursive: true });
 
   const problem = force ? 'regeneration was requested' : certProblem();
   if (!problem) {
-    return { key: SRV_KEY, cert: SRV_CRT, ca: CA_CRT, regenerated: false };
+    return { key: p.srvKey, cert: p.srvCrt, ca: p.caCrt, regenerated: false };
   }
 
   if (!quiet) console.log(`Certificates: ${problem}`);
-  const bin = resolveOpenssl();
 
-  if (force || !existsSync(CA_CRT) || !existsSync(CA_KEY)) {
-    generateCA(bin);
+  let ca = force ? null : loadCA();
+  if (!ca) {
+    if (!quiet) console.log('  creating local certificate authority (10 years)');
+    const generated = generateCA();
+    writeFileSync(p.caKey, generated.keyPem, { mode: 0o600 });
+    writeFileSync(p.caCrt, generated.certPem);
+    ca = loadCA();
   }
-  generateLeaf(bin, desiredSans());
+
+  const sans = desiredSans();
+  if (!quiet) console.log(`  issuing server certificate for ${sanString(sans)}`);
+  const leaf = generateLeaf(ca, sans);
+  writeFileSync(p.srvKey, leaf.keyPem, { mode: 0o600 });
+  writeFileSync(p.srvCrt, leaf.certPem);
 
   if (!quiet) {
     console.log(`  fingerprint (SHA-256): ${fingerprint()}`);
-    console.log(`  trust file for other devices: ${CA_CRT}`);
+    console.log(`  trust file for other devices: ${p.caCrt}`);
   }
 
-  return { key: SRV_KEY, cert: SRV_CRT, ca: CA_CRT, regenerated: true };
+  return { key: p.srvKey, cert: p.srvCrt, ca: p.caCrt, regenerated: true };
 }
 
 // ---------------------------------------------------------------------------

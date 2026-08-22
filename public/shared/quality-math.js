@@ -156,6 +156,43 @@ export function bestPresetForBudget(uploadBudgetBps, participantCount) {
   return PRESETS[0];
 }
 
+/**
+ * Is a peer's 'bandwidth' limitation a real shortage, or just the encoder's start-up ramp?
+ *
+ * The two are indistinguishable to the obvious test. `qualityLimitationReason` reads
+ * 'bandwidth' during both, and "sending less than the cap allows" is what a ramp *is* -- so
+ * requiring both conditions rules out nothing, it states the same fact twice and calls it
+ * corroboration.
+ *
+ * Measured directly: a healthy loopback share at the 1080p60 default reported 'bandwidth' with
+ * the send rate at 1.0-1.7 Mbps against a 6 Mbps cap for the first ten seconds, purely because
+ * the encoder was climbing 960x540 -> 1280x720 -> 1920x1080. Whether the session then held
+ * 60fps or was dropped to 30 for the rest of its life came down to whether that ramp finished
+ * before the consecutive-sample counter filled. Two identical runs went opposite ways, which
+ * is the signature of a race rather than a policy.
+ *
+ * `availableOutgoingBitrate` is what separates them: it is the congestion controller's estimate
+ * of the *link*, not an observation of our own output, so it does not sag merely because the
+ * encoder has not caught up. Across that entire ramp it held steady at 5.04 Mbps -- plain
+ * headroom, and invisible to the send-rate test.
+ *
+ * @param sample one peer's stats: { qualityLimitationReason, availableOutgoingBitrate, actualBitrateBps }
+ * @param capBps the bitrate ceiling currently applied to that peer's sender
+ */
+export function isBandwidthGenuinelyShort(sample, capBps) {
+  if (!sample || sample.qualityLimitationReason !== 'bandwidth') return false;
+
+  if (Number.isFinite(sample.availableOutgoingBitrate)) {
+    // The estimate itself cannot carry this preset. The margin keeps a link sitting just under
+    // the cap from stepping down on measurement noise alone.
+    return sample.availableOutgoingBitrate < capBps * 0.8;
+  }
+
+  // Firefox does not always expose an estimate. Falling back to the weaker send-rate test is
+  // better than never adapting there -- but only here, where nothing better is available.
+  return Number.isFinite(sample.actualBitrateBps) && sample.actualBitrateBps < capBps * 0.6;
+}
+
 // ---------------------------------------------------------------------------
 // Encoder scaling
 // ---------------------------------------------------------------------------

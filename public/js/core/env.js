@@ -38,6 +38,16 @@ export function browserName() {
   return 'unknown';
 }
 
+/**
+ * True when this page is running inside the Streamer desktop app rather than a browser.
+ *
+ * Set by the Electron preload via contextBridge, and only for pages it loads. The distinction is
+ * worth drawing because a handful of instructions are browser-only: the desktop app pins the
+ * server's certificate from the invite link, so telling those users to install a CA file would
+ * be pointing them at a step that does not exist for them.
+ */
+export const isDesktop = () => window.__DESKTOP__ === true;
+
 /** Mobile browsers do not implement getDisplayMedia at all, so this is worth naming
  *  separately -- "use a desktop computer" is actionable where "unsupported" is not. */
 export const isMobile = () =>
@@ -89,6 +99,7 @@ export function environmentSummary() {
     webrtc: hasWebRTC(),
     userMedia: hasUserMedia(),
     displayMedia: hasDisplayMedia(),
+    desktop: isDesktop(),
     protocol: location.protocol,
     e2e: window.__E2E__ === true,
   };

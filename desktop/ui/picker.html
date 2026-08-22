@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'"
+    />
+    <title>Choose what to share</title>
+    <link rel="stylesheet" href="shell.css" />
+    <link rel="stylesheet" href="picker.css" />
+  </head>
+  <body>
+    <div class="picker">
+      <header class="picker__head">
+        <h1>Choose what to share</h1>
+        <div class="picker__tabs" role="tablist">
+          <button role="tab" data-kind="screen" class="is-active" data-testid="tab-screen">
+            Screens
+          </button>
+          <button role="tab" data-kind="window" data-testid="tab-window">Windows</button>
+        </div>
+      </header>
+
+      <div class="picker__grid" id="grid" data-testid="picker-grid"></div>
+      <p class="picker__empty muted" id="empty" hidden>Nothing to show here.</p>
+
+      <footer class="picker__foot">
+        <span class="muted" id="audio-note"></span>
+        <div class="row">
+          <button id="cancel" data-testid="picker-cancel">Cancel</button>
+          <button class="primary" id="share" data-testid="picker-share" disabled>Share</button>
+        </div>
+      </footer>
+    </div>
+
+    <script type="module" src="picker.js"></script>
+  </body>
+</html>

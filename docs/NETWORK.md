@@ -106,11 +106,49 @@ Two honest options:
 Only 8443 needs forwarding. Media does not go through the server, so no media port needs to be
 opened for it — WebRTC negotiates its own paths.
 
-## Windows Firewall
+## Windows Firewall — and the one that is not Windows Firewall
 
 The first run pops a Windows Firewall prompt. Allow it on **Private networks**. Denying it, or
 allowing only Public, is the most common reason another device on the same Wi-Fi cannot reach
-the page.
+the page. The desktop app's installer adds the rule for you.
+
+**Then check your antivirus.** Avast, Kaspersky, Norton and similar ship their own firewall that
+filters inbound connections *independently of Windows Firewall*, and allowing the app in one does
+nothing for the other. This is worth stating plainly because it cost this project real time: on
+the development machine the Windows rule was verified correct — right program path, right profile,
+no conflicting block rule — the router was ruled out by pinging the phone successfully, and
+**Avast's firewall was silently dropping every inbound connection**. Nothing in the app can detect
+or work around that.
+
+If a device on your own Wi-Fi cannot load the page and the address is definitely right, turn the
+antivirus firewall off for two minutes and try again. If that fixes it, add a permanent rule there
+rather than leaving it off.
+
+## When you do not control the router
+
+Port forwarding assumes a router you administer. On guest Wi-Fi, in a hotel, or in an office, there
+is nothing to configure — and guest networks generally drop inbound connections regardless. A
+private address like `10.0.143.0` with a gateway you have never seen is the giveaway.
+
+**Use the tunnel.** The desktop app's room panel can open one over Cloudflare: `cloudflared` dials
+out from your machine and hands back a public HTTPS address pointing at your room. Because the
+connection is outbound, connection 1 stops depending on the router *and* on the firewall entirely
+— nothing is listening on the public internet for anything to block. It also arrives with a real
+certificate, so browser participants get no warning either.
+
+Only signalling goes through Cloudflare. Media stays peer-to-peer, so the property this whole
+architecture exists to protect is unaffected. The cost is that the address is random and changes
+each time you switch it on, unless you attach a domain you own.
+
+See [DESKTOP.md](DESKTOP.md) for how to install cloudflared without administrator rights.
+
+## UPnP, if you use the desktop app
+
+The room panel can also ask the router to forward the port automatically. It is off by default and
+it reports honestly: many routers ship with UPnP disabled, and behind carrier-grade NAT a
+successful mapping still cannot be reached from outside — the app says so explicitly when the
+router reports a private address as its own external one. Treat it as a convenience that sometimes
+works, never as a reason to skip reading this page.
 
 ## Quick diagnosis
 

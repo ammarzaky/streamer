@@ -53,7 +53,12 @@ export function createStatsCollector({ mesh, config, onSample }) {
       for (const peer of mesh.list()) {
         try {
           const report = await peer.getStats();
-          const sample = derive(peer.peerId, report);
+          // Which outgoing audio stream is the microphone. There are two audio senders per
+          // peer -- the mic and the shared system audio -- and they are deliberately separate,
+          // so "the first audio report" is a coin flip between them. The sender the mesh
+          // labels 'mic' knows its own track, and that id is what ties it to a report.
+          const micTrackId = peer.sender?.('mic')?.track?.id ?? null;
+          const sample = derive(peer.peerId, report, micTrackId);
           if (sample) results.push(sample);
         } catch (err) {
           logger.debug('stats: getStats failed', { peerId: peer.peerId, error: err?.message });
@@ -69,11 +74,16 @@ export function createStatsCollector({ mesh, config, onSample }) {
    * Reduce one getStats report to the handful of numbers the UI and the quality controller
    * actually use.
    */
-  function derive(peerId, report) {
+  function derive(peerId, report, micTrackId = null) {
     let outboundVideo = null;
     let inboundVideo = null;
-    let inboundAudio = null;
-    let outboundAudio = null;
+    /** Every inbound audio report summed: "is any voice arriving" is the useful question, and
+     *  a remote peer can be sending both a microphone and shared system audio. */
+    let inboundAudioBytes = 0;
+    let inboundAudioPresent = false;
+    /** Outbound audio, split by which of our two senders produced it. */
+    const outboundAudioReports = [];
+    const mediaSources = new Map();
     let candidatePair = null;
     let transport = null;
     let remoteInbound = null;
@@ -84,11 +94,17 @@ export function createStatsCollector({ mesh, config, onSample }) {
       switch (stat.type) {
         case 'outbound-rtp':
           if (stat.kind === 'video') outboundVideo = stat;
-          else if (stat.kind === 'audio' && !outboundAudio) outboundAudio = stat;
+          else if (stat.kind === 'audio') outboundAudioReports.push(stat);
           break;
         case 'inbound-rtp':
           if (stat.kind === 'video') inboundVideo = stat;
-          else if (stat.kind === 'audio' && !inboundAudio) inboundAudio = stat;
+          else if (stat.kind === 'audio') {
+            inboundAudioBytes += stat.bytesReceived ?? 0;
+            inboundAudioPresent = true;
+          }
+          break;
+        case 'media-source':
+          mediaSources.set(stat.id, stat);
           break;
         case 'remote-inbound-rtp':
           if (stat.kind === 'video') remoteInbound = stat;
@@ -110,6 +126,15 @@ export function createStatsCollector({ mesh, config, onSample }) {
       }
     }
 
+    // An outbound-rtp points at a media-source, and the media-source carries the track id --
+    // which is how the microphone's report is told apart from the shared audio's. Falling back
+    // to the sole report when there is only one, since then there is nothing to confuse.
+    const micOutbound =
+      outboundAudioReports.find((stat) => {
+        const source = stat.mediaSourceId ? mediaSources.get(stat.mediaSourceId) : null;
+        return micTrackId && source?.trackIdentifier === micTrackId;
+      }) ?? (outboundAudioReports.length === 1 ? outboundAudioReports[0] : null);
+
     if (transport?.selectedCandidatePairId) {
       const selected = report.get(transport.selectedCandidatePairId);
       if (selected) candidatePair = selected;
@@ -128,8 +153,8 @@ export function createStatsCollector({ mesh, config, onSample }) {
       t: now,
       bytesSent: outboundVideo?.bytesSent ?? 0,
       bytesReceived: inboundVideo?.bytesReceived ?? 0,
-      audioBytesSent: outboundAudio?.bytesSent ?? 0,
-      audioBytesReceived: inboundAudio?.bytesReceived ?? 0,
+      micBytesSent: micOutbound?.bytesSent ?? 0,
+      audioBytesReceived: inboundAudioBytes,
       framesEncoded: outboundVideo?.framesEncoded ?? 0,
       framesDecoded: inboundVideo?.framesDecoded ?? 0,
       framesDropped: inboundVideo?.framesDropped ?? 0,
@@ -166,6 +191,16 @@ export function createStatsCollector({ mesh, config, onSample }) {
       recvFps: ema(
         previousSmoothed.recvFps,
         perSec(current.framesDecoded, prev.framesDecoded),
+        SMOOTHING,
+      ),
+      micSendBps: ema(
+        previousSmoothed.micSendBps,
+        rate(current.micBytesSent, prev.micBytesSent),
+        SMOOTHING,
+      ),
+      audioRecvBps: ema(
+        previousSmoothed.audioRecvBps,
+        rate(current.audioBytesReceived, prev.audioBytesReceived),
         SMOOTHING,
       ),
     };
@@ -210,6 +245,17 @@ export function createStatsCollector({ mesh, config, onSample }) {
       // Sending video at all? Chrome may drop the outbound-rtp report entirely after
       // replaceTrack(null) rather than freezing it, so absence means stopped.
       hasOutboundVideo: Boolean(outboundVideo),
+
+      // The answer to "can he hear me", which nothing in this app could previously give.
+      //
+      // Two values rather than one, because they fail differently and the distinction is the
+      // whole point: no report at all means the microphone is not attached to this connection,
+      // while a report sitting at zero means it is attached and sending silence. The first is a
+      // bug, the second is usually just the mute button.
+      micSendBps: next.micSendBps,
+      hasMicSender: Boolean(micOutbound),
+      audioRecvBps: next.audioRecvBps,
+      hasInboundAudio: inboundAudioPresent,
     };
   }
 

@@ -8,7 +8,21 @@ import { defineConfig, devices } from '@playwright/test';
  * bugs. Each is commented with what breaks without it, because none of them are guessable.
  */
 
-const PORT = Number(process.env.STREAMER_TEST_PORT ?? 8443);
+/**
+ * Deliberately NOT the app's default 8443.
+ *
+ * `reuseExistingServer` only checks that something answers on the URL. With the suite on the
+ * same port as a running dev server or an installed desktop app, Playwright quietly adopts that
+ * process -- which serves a different copy of public/ and was never started with STREAMER_E2E,
+ * so window.__app is missing and every test fails inside a helper with "cannot read properties
+ * of undefined". The cause is invisible from the failure, and it costs an hour every time.
+ * A distinct default removes the whole class.
+ */
+const PORT = Number(process.env.STREAMER_TEST_PORT ?? 8444);
+// The plain-HTTP redirect listener needs its own port, and it must be overridable separately:
+// otherwise running the suite while a dev server is up fails with EADDRINUSE on 8080 alone,
+// even though STREAMER_TEST_PORT moved the HTTPS port out of the way.
+const HTTP_PORT = Number(process.env.STREAMER_TEST_HTTP_PORT ?? 8081);
 const BASE_URL = `https://localhost:${PORT}`;
 
 /** Flags shared by every browser project. */
@@ -106,6 +120,7 @@ export default defineConfig({
     stderr: 'pipe',
     env: {
       STREAMER_PORT: String(PORT),
+      STREAMER_HTTP_PORT: String(HTTP_PORT),
       // Installs window.__E2E__ so the client swaps in the synthetic capture stream and
       // exposes the read-only window.__app test hook.
       STREAMER_E2E: '1',

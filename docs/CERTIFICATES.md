@@ -89,9 +89,18 @@ anyone, and nothing to install.
 
 ## If something breaks
 
-**"OpenSSL was not found"** — it ships with Git for Windows at
-`C:\Program Files\Git\mingw64\bin\openssl.exe`. Install Git for Windows, or set
-`STREAMER_OPENSSL` to the full path.
+**None of this applies if everyone uses the desktop app.** It pins the certificate's fingerprint
+straight from the invite link, so there is no CA to install and no warning to accept — see
+[DESKTOP.md](DESKTOP.md). The rest of this page is for browser participants.
+
+**Certificates are generated in-process.** There is no OpenSSL dependency any more; earlier
+versions shelled out to it and therefore quietly required Git for Windows to be installed, which
+is not something a packaged app can assume on someone else's machine.
+
+If you have an installation from before that change, its EC certificates keep working untouched.
+The one visible consequence appears if the certificate later needs reissuing — usually because
+the machine's LAN IP changed: the old CA cannot sign the new leaf, so a fresh CA is created and
+browser participants install `ca.crt` once more. App participants are unaffected.
 
 **A device still warns after installing the CA** — Firefox uses its own certificate store, and
 iOS needs the separate trust toggle described above. Also confirm the address you are visiting

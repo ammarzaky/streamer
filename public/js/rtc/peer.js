@@ -31,6 +31,13 @@ const DISCONNECTED_GRACE_MS = 5000;
  *  ICE restart to complete on a slow link, short enough not to be a permanent spinner. */
 const GIVE_UP_AFTER_MS = 15_000;
 
+/** ICE restarts allowed per connected-period. Reaching 'connected' resets the count. */
+const MAX_RESTART_ATTEMPTS = 3;
+
+/** Multiplied by the attempt number, so retries sample different moments of a settling network
+ *  rather than firing three times inside one second. */
+const RESTART_BACKOFF_MS = 4000;
+
 /** Fixed transceiver order. Both sides depend on this, since the polite peer adopts
  *  transceivers by index from the offer. */
 const TRACK_ROLES = ['mic', 'shareAudio', 'video'];
@@ -84,6 +91,7 @@ export function createPeer({
   let pendingCandidates = [];
   let disconnectedTimer = null;
   let giveUpTimer = null;
+  let retryTimer = null;
   let restartAttempts = 0;
   let reportedFailed = false;
   let closed = false;
@@ -356,6 +364,7 @@ export function createPeer({
         restartAttempts = 0;
         reportedFailed = false;
         clearTimeout(giveUpTimer);
+        clearTimeout(retryTimer);
         onStateChange?.({ peerId, state: 'connected' });
         break;
 
@@ -386,25 +395,40 @@ export function createPeer({
   });
 
   /**
-   * The recovery ladder: one ICE restart, then give up with a specific error.
+   * The recovery ladder: a few spaced ICE restarts, then give up with a specific error.
    *
    * Only the initiating side restarts. Both sides restarting produces duelling offers at the
-   * exact moment the connection is least able to cope. Giving up is a real outcome here --
-   * two networks that cannot reach each other directly will not start being able to, and
-   * saying so beats retrying forever behind a spinner.
+   * exact moment the connection is least able to cope. Giving up is a real outcome -- two
+   * networks that genuinely cannot reach each other will not start being able to, and saying so
+   * beats retrying forever behind a spinner.
+   *
+   * The budget is per connected-period; reaching 'connected' resets it. It is more than one
+   * because of the case that motivated this: a laptop moving between networks mid-call, where
+   * the first restart fires while the new interface is still settling -- no address yet, or a
+   * gateway not yet answering. That attempt is doomed for reasons unrelated to whether the two
+   * networks can reach each other, and spending the whole budget on it turned a recoverable
+   * move into a dead connection reporting "couldn't connect directly to this person".
    */
   function recover() {
     if (closed) return;
 
-    if (youInitiate && restartAttempts === 0) {
-      restartAttempts++;
-      logger.info('peer: restarting ICE', { peerId });
+    if (youInitiate && restartAttempts < MAX_RESTART_ATTEMPTS) {
+      const attempt = ++restartAttempts;
+      logger.info('peer: restarting ICE', { peerId, attempt, of: MAX_RESTART_ATTEMPTS });
       try {
         pc.restartIce();
         // If the restart does not take, the connection ends up back here via `failed`, or
         // this timer reports it. Without the timer an answerer whose initiator is asleep in a
         // backgrounded tab sits on "reconnecting" forever and is never told otherwise.
         armGiveUpTimer();
+
+        // Schedule the next rung. Without it, a restart that merely landed too early is also
+        // the last one that will ever be tried.
+        clearTimeout(retryTimer);
+        retryTimer = setTimeout(() => {
+          if (closed || pc.connectionState === 'connected') return;
+          recover();
+        }, RESTART_BACKOFF_MS * attempt);
         return;
       } catch (err) {
         logger.warn('peer: restartIce failed', { peerId, error: err?.message });
@@ -453,6 +477,7 @@ export function createPeer({
     closed = true;
     clearTimeout(disconnectedTimer);
     clearTimeout(giveUpTimer);
+    clearTimeout(retryTimer);
     pendingCandidates = [];
     desiredTracks.mic = null;
     desiredTracks.shareAudio = null;

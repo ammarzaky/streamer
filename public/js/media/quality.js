@@ -22,6 +22,7 @@ import {
   PRESETS,
   effectiveCapBps,
   scaleResolutionDownBy,
+  isBandwidthGenuinelyShort,
 } from '../../shared/quality-math.js';
 import { logger } from '../core/logger.js';
 
@@ -266,23 +267,29 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
     const { cap } = perPeerCap();
 
     const anyCpu = samples.some((s) => s.qualityLimitationReason === 'cpu');
-    const anyBandwidth = samples.some(
-      (s) =>
-        s.qualityLimitationReason === 'bandwidth' &&
-        Number.isFinite(s.actualBitrateBps) &&
-        s.actualBitrateBps < cap * 0.6,
-    );
+    const anyBandwidth = samples.some((s) => isBandwidthGenuinelyShort(s, cap));
 
     cpuSamples = anyCpu ? cpuSamples + 1 : 0;
     bandwidthSamples = anyBandwidth ? bandwidthSamples + 1 : 0;
 
-    if (cpuSamples >= cpuThreshold) return stepDownNow(LIMITED_BY.CPU);
-    if (bandwidthSamples >= bandwidthThreshold) return stepDownNow(LIMITED_BY.BANDWIDTH);
+    if (cpuSamples >= cpuThreshold) return stepDownNow(LIMITED_BY.CPU, { capBps: cap });
+    if (bandwidthSamples >= bandwidthThreshold) {
+      // The estimate that justified the decision travels with it. An automatic downgrade with no
+      // number attached is unfalsifiable after the fact: "it dropped me to 30fps" and "the link
+      // really was short of headroom" look identical in a log that records only the outcome.
+      const estimates = samples
+        .map((s) => s.availableOutgoingBitrate)
+        .filter((value) => Number.isFinite(value));
+      return stepDownNow(LIMITED_BY.BANDWIDTH, {
+        capBps: cap,
+        estimateBps: estimates.length ? Math.min(...estimates) : null,
+      });
+    }
 
     maybeSuggestRaise(samples);
   }
 
-  function stepDownNow(reason) {
+  function stepDownNow(reason, evidence = {}) {
     const next = stepDown(presetId);
     if (next.id === presetId) {
       // Already at the floor. Report the constraint rather than pretending it is fine.
@@ -290,7 +297,7 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
       return;
     }
 
-    logger.info('quality: stepping down', { from: presetId, to: next.id, reason });
+    logger.info('quality: stepping down', { from: presetId, to: next.id, reason, ...evidence });
     presetId = next.id;
     lastChangeAt = performance.now();
     resetCounters();

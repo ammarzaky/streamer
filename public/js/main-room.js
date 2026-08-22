@@ -6,7 +6,7 @@
  */
 
 import { C2S, S2C, ERRORS, CLOSE, END_REASON } from '../shared/protocol.js';
-import { DEFAULT_PRESET_ID } from '../shared/quality-math.js';
+import { DEFAULT_PRESET_ID, getPreset } from '../shared/quality-math.js';
 
 import { store } from './state/room-store.js';
 import { bus, EVENTS } from './core/event-bus.js';
@@ -17,7 +17,9 @@ import { errorCopy, errorLine, UI } from './ui/strings.js';
 import { createSignalingClient } from './net/signaling.js';
 import { createMesh, MESH_MESSAGE_TYPES } from './rtc/mesh.js';
 import { createMediaManager } from './media/media-manager.js';
-import { createQualityController } from './media/quality.js';
+import { createLevelMeter } from './media/level-meter.js';
+import { startMicCheck, MIC_STATE } from './media/mic-check.js';
+import { createQualityController, LIMITED_BY } from './media/quality.js';
 import { createStatsCollector } from './stats/stats-collector.js';
 import { createRoomView } from './ui/room-view.js';
 import { createToasts } from './ui/toast.js';
@@ -126,6 +128,15 @@ if (location.hash) history.replaceState(null, '', location.pathname + location.s
 const toasts = createToasts(mountToastContainer());
 const view = createRoomView({ store, bus, EVENTS });
 
+/**
+ * The lobby microphone check, held so the device can be released the moment the user joins.
+ *
+ * Declared up here rather than beside its functions because boot() is invoked from module top
+ * level, above them. Function declarations hoist and are fine; let and const are still in their
+ * temporal dead zone, and reaching one throws before the lobby has finished rendering.
+ */
+let lobbyMicCheck = null;
+
 if (isE2E()) logger.setLevel('debug');
 
 if (!routeRoomId) {
@@ -153,6 +164,30 @@ function boot() {
   store.setRoom({ id: isCreating ? null : routeRoomId });
   view.renderAll();
   view.el.name.focus();
+
+  startLobbyMicCheck();
+}
+
+function micCheckCopy(state, code) {
+  switch (state) {
+    case MIC_STATE.CHECKING: return UI.micCheckChecking;
+    case MIC_STATE.HEARING: return UI.micCheckHearing;
+    case MIC_STATE.QUIET: return UI.micCheckQuiet;
+    case MIC_STATE.FAILED: return errorLine(code ?? ERRORS.MIC_FAILED);
+    default: return '';
+  }
+}
+
+function startLobbyMicCheck() {
+  lobbyMicCheck = startMicCheck(({ state, level, code }) => {
+    view.setLobbyMicLevel(level, { dead: state === MIC_STATE.FAILED });
+    view.setLobbyMicStatus(micCheckCopy(state, code));
+  });
+}
+
+function stopLobbyMicCheck() {
+  lobbyMicCheck?.stop();
+  lobbyMicCheck = null;
 }
 
 // -----------------------------------------------------------------------------
@@ -220,7 +255,21 @@ function buildEngine() {
   quality = createQualityController({
     config: serverConfig,
     mesh,
-    onChange: (patch) => store.setQuality(patch),
+    onChange: (patch) => {
+      store.setQuality(patch);
+      // An automatic downgrade is the most disorienting thing this app can do silently: the
+      // frame rate halves, the quality button changes underneath the user, and nothing says
+      // why -- leaving "I picked 1080p60 and I'm getting 30" with no available explanation.
+      // Exactly one toast, naming the reason, on the transition only.
+      if (patch.steppedDown) {
+        const label = getPreset(patch.presetId).label;
+        toasts.warn(
+          patch.reason === LIMITED_BY.CPU
+            ? UI.qualityLoweredCpu(label)
+            : UI.qualityLoweredNetwork(label),
+        );
+      }
+    },
     onSuggestRaise: (preset) => toasts.info(UI.qualityRaiseSuggestion(preset.label)),
   });
 
@@ -301,6 +350,9 @@ function handleStatsSample(samples) {
 // -----------------------------------------------------------------------------
 
 bus.on(EVENTS.INTENT_JOIN, ({ name, accessCode }) => {
+  // Handed back before the media manager asks for it, so the two are never contending for the
+  // same device. Permission is already granted by now, so the real acquisition is silent.
+  stopLobbyMicCheck();
   view.setLobbyBusy(true, isCreating ? UI.creating : UI.joining);
   store.setSelf({ name });
 
@@ -528,47 +580,63 @@ function applyJoinedIdentity(data) {
  * existing tracks are simply re-attached to the freshly built peer connections.
  */
 async function restoreLocalMedia() {
+  // The microphone and the screen share are restored independently.
+  //
+  // They used to be nested -- the share was only re-attached inside `if (existingMic)` -- which
+  // meant anyone without a working microphone silently lost their screen share on every
+  // reconnect, and a reconnect is exactly what a change of network causes. Two unrelated pieces
+  // of state should not share a conditional.
   const existingMic = media?.micTrack;
 
   if (existingMic) {
     await mesh.setLocalTrack('mic', existingMic);
-    // Peers cannot observe `enabled`, so our mute state has to be restated to a room that
-    // has never heard it.
-    signaling.send(C2S.MUTE_STATE, { micMuted: store.state.self.micMuted });
-
-    if (media.isSharing) {
-      const video = media.displayVideoTrack;
-      const audio = media.displayAudioTrack;
-      if (video) await mesh.setLocalTrack('video', video);
-      if (audio) await mesh.setLocalTrack('shareAudio', audio);
-      // Ownership did not survive our disconnection: the server released the slot when our
-      // socket died. Ask for it back, and stop if somebody else has taken it -- otherwise two
-      // people would be transmitting screens at once.
-      signaling.send(C2S.CLAIM_SHARE, { force: false });
-    }
-
-    await quality.apply();
-    return;
+  } else {
+    // No track yet, or the last attempt failed. Try again rather than spending the rest of the
+    // session unable to speak.
+    await startLocalMedia({ announce: false });
   }
 
-  await startLocalMedia();
+  // Peers cannot observe `enabled`, so our mute state has to be restated to a room that has
+  // never heard it. Unconditional: an unmute pressed while the socket was down was dropped with
+  // the rest of the outbound queue, so this is the only thing that puts the room right.
+  signaling.send(C2S.MUTE_STATE, { micMuted: store.state.self.micMuted });
+
+  if (media?.isSharing) {
+    const video = media.displayVideoTrack;
+    const audio = media.displayAudioTrack;
+    if (video) await mesh.setLocalTrack('video', video);
+    if (audio) await mesh.setLocalTrack('shareAudio', audio);
+    // Ownership did not survive our disconnection: the server released the slot when our socket
+    // died. Ask for it back, and stop if somebody else has taken it -- otherwise two people
+    // would be transmitting screens at once.
+    signaling.send(C2S.CLAIM_SHARE, { force: false });
+  }
+
+  await quality.apply();
 }
 
-async function startLocalMedia() {
+async function startLocalMedia({ announce = true } = {}) {
   try {
     const track = await media.startMic();
+    if (!track) throw new AppError(ERRORS.MIC_NOT_FOUND);
+
     // Muted on arrival: joining a call and being live before you have said anything is a
     // small privacy failure people notice.
     media.setMicMuted(true);
-    store.setSelf({ micMuted: true });
-    signaling.send(C2S.MUTE_STATE, { micMuted: true });
-    if (track) await mesh.setLocalTrack('mic', track);
+    store.setSelf({ micMuted: true, micAvailable: true });
+    if (announce) signaling.send(C2S.MUTE_STATE, { micMuted: true });
+    await mesh.setLocalTrack('mic', track);
     await quality.apply();
+    syncMicMeter();
+    return true;
   } catch (err) {
     const appError = err instanceof AppError ? err : new AppError(ERRORS.MIC_FAILED, { cause: err });
-    // Not fatal: a participant with no microphone can still watch and share.
+    // Not fatal: a participant with no microphone can still watch and share. But it must be
+    // recorded, because the mute button has to stop pretending afterwards.
     toasts.warn(errorLine(appError.code));
-    store.setSelf({ micMuted: true });
+    store.setSelf({ micMuted: true, micAvailable: false, micError: appError.code });
+    if (announce) signaling.send(C2S.MUTE_STATE, { micMuted: true });
+    return false;
   }
 }
 
@@ -747,13 +815,72 @@ async function stopSharing(reason, epoch = store.state.share.epoch) {
 // Intents
 // -----------------------------------------------------------------------------
 
-bus.on(EVENTS.INTENT_TOGGLE_MIC, () => {
+bus.on(EVENTS.INTENT_TOGGLE_MIC, () => void toggleMic());
+
+/**
+ * Mute and unmute, without ever claiming to be live when nothing is being sent.
+ *
+ * The optimistic update is right for muting -- a button that waits for a round trip feels
+ * broken -- and wrong for unmuting when there is no track behind it. `setMicMuted(false)` is
+ * `if (track) track.enabled = true`, so with no track it does nothing at all while the button
+ * flips to "Mute" and the roster shows you unmuted to everyone else. That is the app telling
+ * both ends a falsehood, and it is unfalsifiable from either screen.
+ *
+ * Unmuting is also the natural moment to retry acquisition: it is when the user has actually
+ * asked to speak, and it recovers the cases where permission was granted, a headset was plugged
+ * in, or another application released the device after this one joined.
+ */
+async function toggleMic() {
   if (!media) return;
-  const muted = media.setMicMuted(!store.state.self.micMuted);
-  // Optimistic: a mute button that waits for the network feels broken.
-  store.setSelf({ micMuted: muted });
+
+  const wantLive = store.state.self.micMuted;
+
+  if (!wantLive) {
+    announceMic(media.setMicMuted(true));
+    return;
+  }
+
+  if (!media.micTrack) {
+    const acquired = await startLocalMedia({ announce: false });
+    // startLocalMedia has already explained the failure and left us muted. Saying nothing more
+    // is deliberate: two messages for one cause reads like two problems.
+    if (!acquired) {
+      announceMic(true);
+      return;
+    }
+  }
+
+  announceMic(media.setMicMuted(false));
+}
+
+/**
+ * The in-room level meter.
+ *
+ * Rebuilt whenever the live track changes -- a reconnect or a retried acquisition produces a
+ * different track object, and a meter left pointing at the old one reads a flat zero forever,
+ * which is precisely the wrong answer to "is my microphone working".
+ */
+let micMeter = null;
+let meteredTrack = null;
+
+function syncMicMeter() {
+  const track = media?.micTrack ?? null;
+  if (track === meteredTrack) return;
+
+  micMeter?.stop();
+  micMeter = null;
+  meteredTrack = track;
+  view.setStageMicLevel(0);
+
+  if (!track) return;
+  micMeter = createLevelMeter(track, (level) => view.setStageMicLevel(level));
+}
+
+function announceMic(muted) {
+  store.setSelf({ micMuted: muted, micAvailable: Boolean(media?.micTrack) });
   signaling.send(C2S.MUTE_STATE, { micMuted: muted });
-});
+  syncMicMeter();
+}
 
 bus.on(EVENTS.INTENT_START_SHARE, () => startSharing({ force: false }));
 

@@ -87,11 +87,31 @@
     "iceServers": [
       { "urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }
     ],
+    "_turnComment": [
+      "A relay for the cases STUN cannot solve. Direct connection fails when both ends sit",
+      "behind symmetric NAT, and no configuration on either machine can change that -- it is a",
+      "property of the networks in between.",
+      "",
+      "Disabled by default, and that is the important part: enabling it routes media through a",
+      "third party, which is the one thing this app otherwise never does. It is here so that a",
+      "call which will not connect is a one-flag fix rather than an evening of debugging, not",
+      "because it should be on.",
+      "",
+      "The urls below are Metered's Open Relay, which is free and needs no signup. Its",
+      "credentials are public and shared, so treat it as best-effort: its operator can see that",
+      "a session happened and how much data moved, never its contents -- media stays end-to-end",
+      "encrypted even when relayed. If you need this regularly, run coturn on a machine you own",
+      "(Oracle Cloud's always-free tier is enough) and put its address here instead.",
+      "",
+      "iceTransportPolicy stays 'all' so the relay is a fallback, not the default path: ICE",
+      "only uses it when nothing direct works. Setting 'relay' would force every call through",
+      "it."
+    ],
     "turn": {
       "enabled": false,
-      "urls": [],
-      "username": "",
-      "credential": ""
+      "urls": ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443"],
+      "username": "openrelayproject",
+      "credential": "openrelayproject"
     },
     "iceTransportPolicy": "all",
     "bundlePolicy": "max-bundle",
@@ -116,9 +136,15 @@
       "use a shorter window than CPU-triggered ones so saturation is measured in seconds.",
       "",
       "Set it to your actual measured upload speed. It is the single most useful number to",
-      "get right in this file."
+      "get right in this file.",
+      "",
+      "The default is 10000 rather than 20000 because 20 Mbps was an aspiration, not a",
+      "measurement, and a budget above the real link is worse than no budget: it makes the",
+      "clamp inert precisely where it was supposed to help. 10 Mbps is a defensible figure",
+      "for ordinary home fibre, and it still leaves the whole budget to the single remote",
+      "peer in a two-person call -- enough for the 1080p60 default at 6 Mbps."
     ],
-    "uploadBudgetKbps": 20000,
+    "uploadBudgetKbps": 10000,
 
     "_adaptComment": [
       "Consecutive 1-second samples of a limitation reason before stepping down one rung.",
@@ -129,12 +155,16 @@
       "adaptWarmupMs ignores everything for the first seconds of a new video track. During",
       "that window the encoder is still ramping and the send rate is legitimately far below",
       "the cap while qualityLimitationReason reads 'bandwidth' -- the estimator probing, not",
-      "congestion. Adapting on it permanently downgrades a call that was about to be healthy."
+      "congestion. Adapting on it permanently downgrades a call that was about to be healthy.",
+      "Measured here, a 1080p60 share climbed 960x540 -> 1280x720 -> 1920x1080 over about",
+      "twelve seconds, reporting 'bandwidth' throughout; 15s clears that with margin. The",
+      "primary defence is the availableOutgoingBitrate check in quality.js -- this is the",
+      "backstop for browsers that do not report an estimate."
     ],
     "stepDownSamplesCpu": 8,
     "stepDownSamplesBandwidth": 6,
     "adaptCooldownMs": 10000,
-    "adaptWarmupMs": 8000,
+    "adaptWarmupMs": 15000,
 
     "audio": {
       "_comment": [

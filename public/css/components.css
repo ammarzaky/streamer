@@ -725,3 +725,97 @@
   text-decoration: line-through;
   text-decoration-color: var(--text-3);
 }
+
+/* ---------------------------------------------------------------------------
+ * Microphone level meter
+ *
+ * Exists because of a call where the far end could not hear the host and nothing in the app
+ * could answer "is my microphone picking anything up". A bar that moves when you speak answers
+ * it before anyone is waiting on you.
+ * ------------------------------------------------------------------------ */
+
+.meter {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.meter__fill {
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: var(--ok);
+  /* Fast enough to feel responsive to speech, slow enough not to strobe between words. The
+     level itself is already smoothed; this only takes the edge off the remaining steps. */
+  transition: width 80ms linear, background-color 200ms ease;
+}
+
+/* Speaking while muted. The bar still moves -- it is fed a clone of the track that stays
+   enabled -- and turning it amber is what makes "nobody can hear you" obvious. */
+.meter__fill--muted {
+  background: var(--warn);
+}
+
+.meter__fill--dead {
+  background: var(--danger);
+}
+
+.miccheck {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.miccheck .field__hint {
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Fullscreen overlay
+ *
+ * The real control bar lives outside #stage, so fullscreening the stage would otherwise leave
+ * no way to mute or exit except a shortcut nobody has been told about.
+ * ------------------------------------------------------------------------ */
+
+.stage__overlay {
+  position: absolute;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(11, 13, 16, 0.82);
+  border: 1px solid var(--line-2);
+  backdrop-filter: blur(8px);
+  z-index: 5;
+  opacity: 1;
+  transition: opacity 220ms ease;
+}
+
+.stage__overlay[hidden] {
+  display: none;
+}
+
+/* Faded rather than removed, so the pointer moving back brings it straight up without a
+   reflow, and so it never steals a click while on its way out. */
+.stage__overlay--idle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.stage__overlay .meter--overlay {
+  width: 72px;
+  flex: none;
+}
+
+.ctl--sm {
+  flex-direction: row;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  min-width: 0;
+}
