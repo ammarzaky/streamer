@@ -670,7 +670,11 @@ app.whenReady().then(() => {
   // up on inherits them.
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
     const url = contents.getURL();
-    const allowed = ['media', 'display-capture', 'clipboard-sanitized-write'];
+    // 'fullscreen' belongs here: Chromium treats requestFullscreen() as a permission, so
+    // leaving it out silently denied every attempt -- the button, the double-click and F all did
+    // nothing, with no error anywhere. The browser E2E never caught it because a plain browser
+    // has no Electron permission handler to deny it.
+    const allowed = ['media', 'display-capture', 'clipboard-sanitized-write', 'fullscreen'];
     const trusted = isLocalPage(url) || (target && sameOrigin(url, target.origin));
     callback(Boolean(trusted) && allowed.includes(permission));
   });

@@ -94,3 +94,43 @@ test('the room page is told it is inside the desktop app, and gets nothing else'
 
   await app.close();
 });
+
+test('fullscreen works inside the desktop app, not just in a browser', async () => {
+  // This test exists because of a bug it would have caught and the browser suite could not.
+  //
+  // Chromium treats requestFullscreen() as a *permission*. The main process installs a
+  // setPermissionRequestHandler that allow-lists only what the app needs, and 'fullscreen' was
+  // missing from that list -- so every attempt was denied in silence. No error, no rejected
+  // promise worth reading, just a button that did nothing.
+  //
+  // The browser E2E asserted the same behaviour and passed the whole time, because a plain
+  // browser has no Electron permission handler to deny it. A feature gated by main-process
+  // policy has to be tested where that policy actually runs.
+  const app = await launchApp({ port: PORT });
+  const home = await homeWindow(app);
+
+  await home.getByTestId('host-button').click();
+  await home.waitForURL(`https://localhost:${PORT}/r/new`, { timeout: 45_000 });
+  await home.getByLabel('Your name').fill('Host');
+  await home.getByRole('button', { name: /create room/i }).click();
+  await home.waitForURL(new RegExp(`^https://localhost:${PORT}/r/[A-Za-z0-9_-]{8,}$`), {
+    timeout: 30_000,
+  });
+
+  await home.getByTestId('fullscreen-toggle').click();
+
+  await expect
+    .poll(() => home.evaluate(() => document.fullscreenElement?.id ?? null), {
+      timeout: 15_000,
+      message: 'the fullscreen permission is denied by the main process',
+    })
+    .toBe('stage');
+
+  // Leaving must work from the overlay, since the real control bar is off-screen in fullscreen.
+  await home.getByTestId('overlay-exit').click();
+  await expect
+    .poll(() => home.evaluate(() => document.fullscreenElement?.id ?? null), { timeout: 15_000 })
+    .toBe(null);
+
+  await app.close();
+});
