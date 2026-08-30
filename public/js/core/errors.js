@@ -59,7 +59,10 @@ export function micError(err) {
     // holding it exclusively.
     case 'NotReadableError':
     case 'TrackStartError':
-      return new AppError(ERRORS.MIC_IN_USE, { cause: err });
+      // The browser's message is the only clue to WHICH of several OS-level causes this is
+      // (another app, the Windows privacy gate, a driver that failed to open), so it travels
+      // as detail into the diagnostics dump.
+      return new AppError(ERRORS.MIC_IN_USE, { cause: err, detail: err?.message || undefined });
 
     case 'OverconstrainedError':
     case 'ConstraintNotSatisfiedError':

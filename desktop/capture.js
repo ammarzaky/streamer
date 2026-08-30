@@ -34,15 +34,19 @@ export function installCapture(session, getParent) {
   session.setDisplayMediaRequestHandler(
     async (_request, callback) => {
       try {
-        const source = await pickSource(getParent());
-        if (!source) {
+        const choice = await pickSource(getParent());
+        if (!choice?.source) {
           // No video means "cancelled" to Chromium, which surfaces in the renderer as the same
           // NotAllowedError a dismissed browser picker produces -- already mapped to
           // SHARE_CANCELLED, and already treated as information rather than an error.
           callback({});
           return;
         }
-        callback({ video: source, audio: systemAudio() });
+        const audio = choice.systemAudio ? systemAudio() : undefined;
+        log('display-capture', { source: choice.source.name, kind: choice.source.id.split(':')[0], audio: audio ?? 'none' });
+        // The key is omitted rather than set to undefined: Electron validates the shape of
+        // this object, and "no audio" is the absence of the key.
+        callback(audio ? { video: choice.source, audio } : { video: choice.source });
       } catch {
         callback({});
       }
@@ -52,7 +56,7 @@ export function installCapture(session, getParent) {
     { useSystemPicker: false },
   );
 
-  ipcMain.on('picker:choose', (_event, id) => resolvePicker(id));
+  ipcMain.on('picker:choose', (_event, id, options) => resolvePicker(id, options));
   ipcMain.on('picker:cancel', () => resolvePicker(null));
   // Same {ok, value, error} envelope every other handler uses, so the preload can unwrap them
   // all through one helper.
@@ -68,8 +72,22 @@ export function installCapture(session, getParent) {
 /**
  * Windows can hand us the system mix; macOS and Linux cannot do it this way, and asking anyway
  * makes the whole request fail rather than degrading to video-only.
+ *
+ * What 'loopback' captures deserves saying plainly, because it is the cause of "I hear my own
+ * voice when my friend shares": it is a WASAPI loopback of the default render endpoint -- the
+ * WHOLE system mix, including this app's own playback of every other participant. The sharer
+ * therefore sends everyone's voices back to them, delayed by a round trip (electron/electron
+ * #27337). 'loopbackWithMute' would silence the sharer's own speakers rather than exclude our
+ * output, and Chromium's restrictOwnAudio does not apply to this path, so the honest options are
+ * the picker's "Share system audio" checkbox and headphones. Both are documented.
  */
 const systemAudio = () => (process.platform === 'win32' ? 'loopback' : undefined);
+
+/** Main-process log line, in the same shape the server uses. Never SDP, never addresses. */
+let log = (event, detail) => console.log(`[desktop] ${event}`, detail ?? '');
+export function setCaptureLogger(fn) {
+  log = fn;
+}
 
 async function listSources() {
   const sources = await desktopCapturer.getSources({
@@ -119,7 +137,7 @@ function pickSource(parent) {
     });
 
     pending = {
-      resolve: async (id) => {
+      resolve: async (id, options = {}) => {
         pending = null;
         if (!picker.isDestroyed()) picker.destroy();
         if (!id) {
@@ -129,7 +147,8 @@ function pickSource(parent) {
         // Re-read the sources rather than caching the objects from the list call: Chromium wants
         // the live source, and between listing and choosing a window can have closed.
         const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
-        resolve(sources.find((source) => source.id === id) ?? null);
+        const source = sources.find((entry) => entry.id === id) ?? null;
+        resolve(source ? { source, systemAudio: options?.systemAudio !== false } : null);
       },
     };
 
@@ -147,9 +166,9 @@ function pickSource(parent) {
   });
 }
 
-function resolvePicker(id) {
+function resolvePicker(id, options) {
   const current = pending;
   if (!current) return;
   pending = null;
-  void current.resolve(id);
+  void current.resolve(id, options);
 }

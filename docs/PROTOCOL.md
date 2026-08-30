@@ -155,18 +155,33 @@ so the client treats it as informational, not as a failure to show)
 ## Server → client
 
 ### `welcome`
-Sent immediately on open, before anything is asked for.
+Sent immediately on open, before anything is asked for. The shape is `toClientConfig()` in
+`src/config.js`:
 ```jsonc
 {
   "iceServers": [{ "urls": ["stun:…"] }],
+  "iceTransportPolicy": "all",
+  "bundlePolicy": "max-bundle",
   "maxParticipants": 4,
+  "oneSharerAtATime": true,
   "defaultPreset": "1080p60",
   "uploadBudgetKbps": 20000,
   "autoAdapt": true,
-  "oneSharerAtATime": true,
+  "stepDownSamplesCpu": 8,
+  "stepDownSamplesBandwidth": 6,
+  "adaptCooldownMs": 10000,
+  "adaptWarmupMs": 15000,
+  "includeDisplayAudio": true,
+  "statsPollIntervalMs": 1000,
+  "audio": { "echoCancellation": true, "noiseSuppression": true, "autoGainControl": true, "channelCount": 1 },
   "limits": { "maxNameChars": 32 }
 }
 ```
+`audio` is the capture-processing contract: the room passes it through `micConstraints()`
+(`public/js/media/mic-constraints.js`) for every microphone acquisition, so changing
+`config.media.audio` on the server changes every client's capture. Unknown keys (such as the
+config file's `_comment`) are ignored; the lobby check runs before the socket opens and uses
+the client-side defaults, which a unit test keeps equal to `config.default.json`.
 
 ### `room-created`
 ```jsonc
@@ -178,6 +193,7 @@ Sent immediately on open, before anything is asked for.
 {
   "roomId": "kJ8x…",
   "selfId": "p-4",
+  "joinOrder": 4,
   "isHost": false,
   "hostPeerId": "p-1",
   "maxParticipants": 4,
@@ -281,6 +297,20 @@ renegotiates" true — with `addTrack` instead, every share, every stop, and eve
 mic fires `negotiationneeded`. And transceivers created implicitly by `setRemoteDescription`
 start `recvonly`; `replaceTrack` does **not** promote them, so a polite peer that skips the
 direction assignment sends nothing at all, with no error anywhere to say why.
+
+### Diagnostics data channels
+
+The initiator also creates two `RTCDataChannel`s — `diag` (unordered, no retransmits: a
+once-a-second report of what this peer hears from the other and the state of its `<audio>`
+element) and `diag-dump` (ordered, reliable, chunked, ≤ 64 KB: a peer's whole diagnostics
+dump on request). They are created **in the same task as, and before, `createTransceivers()`**
+so both land in the one initial offer; a channel created later would cost a second
+negotiation for telemetry. The answerer adopts them from `ondatachannel`; they occupy no
+transceiver, so index-based adoption of the three m-lines is untouched.
+
+They carry **diagnostics only, never signaling**. Nothing in this document changes: the
+message inventory in `protocol.js` is the same, and the server neither sees nor relays
+anything on these channels. Everything received on them is parsed as untrusted input.
 
 ### Reconnect
 

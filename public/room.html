@@ -54,6 +54,16 @@
               <p class="field__hint" id="lobby-mic-status" data-testid="lobby-mic-status">
                 Checking…
               </p>
+              <!-- Which microphone. Populated once permission is granted (labels are blank
+                   before that). The default the browser picks on Windows is often not the
+                   headset, and this is the one moment to find that out without an audience. -->
+              <select
+                id="lobby-mic-device"
+                class="input input--sm"
+                data-testid="lobby-mic-device"
+                aria-label="Microphone"
+                hidden
+              ></select>
             </div>
           </div>
 
@@ -112,7 +122,7 @@
               height="48"
               aria-hidden="true"
               focusable="false"
-              style="color: var(--text-3)"
+              class="stage__empty-icon"
             >
               <use href="/assets/icons.svg#screen"></use>
             </svg>
@@ -167,12 +177,35 @@
       </div>
 
       <footer class="controlbar">
-        <button id="mic-toggle" class="ctl" type="button" data-testid="mic-toggle">
-          <svg class="ctl__icon" aria-hidden="true" focusable="false">
-            <use id="mic-icon" href="/assets/icons.svg#mic"></use>
-          </svg>
-          <span id="mic-label">Mute</span>
-        </button>
+        <!-- The microphone group: the mute button carries an always-visible level bar (the
+             fullscreen overlay's bar is the only other one, and it is hidden until then), a
+             caret opens the device / processing / diagnostics menu, and a one-line verdict
+             sits above the group when something needs saying. -->
+        <div class="ctl-group" id="mic-group">
+          <button id="mic-toggle" class="ctl" type="button" data-testid="mic-toggle">
+            <svg class="ctl__icon" aria-hidden="true" focusable="false">
+              <use id="mic-icon" href="/assets/icons.svg#mic"></use>
+            </svg>
+            <span id="mic-label">Mute</span>
+            <span class="meter meter--ctl" role="img" aria-label="Microphone level">
+              <span class="meter__fill" id="ctl-meter-fill" data-testid="room-meter"></span>
+            </span>
+          </button>
+          <button
+            id="mic-menu-toggle"
+            class="ctl ctl--caret"
+            type="button"
+            data-testid="mic-menu-toggle"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-label="Microphone options"
+            title="Microphone options"
+          >
+            ▴
+          </button>
+          <div id="mic-menu" class="quality mic-menu" role="menu" hidden></div>
+          <p id="mic-hint" class="ctl__hint" data-testid="mic-hint" hidden></p>
+        </div>
 
         <button id="share-toggle" class="ctl" type="button" data-testid="share-toggle">
           <svg class="ctl__icon" aria-hidden="true" focusable="false">
@@ -196,7 +229,7 @@
         </button>
 
         <div class="controlbar__end">
-          <div style="position: relative">
+          <div class="controlbar__anchor">
             <button
               id="quality-toggle"
               class="btn btn--secondary btn--sm"
@@ -234,7 +267,7 @@
     </div>
 
     <!-- Remote audio elements are appended here, outside the video stage. -->
-    <div id="audio-sinks" aria-hidden="true" style="position: absolute; width: 0; height: 0; overflow: hidden"></div>
+    <div id="audio-sinks" class="audio-sinks" aria-hidden="true"></div>
 
     <script type="module" src="/js/main-room.js"></script>
   </body>

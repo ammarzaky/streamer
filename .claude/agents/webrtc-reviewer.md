@@ -74,6 +74,17 @@ handles it correctly, or report it as a finding.
 22. **Selected candidate pair.** Prefer `transport.selectedCandidatePairId`; fall back to
     scanning for `nominated && state === 'succeeded'` (Firefox).
 
+## Data channels and mic swaps
+23. **The diag data channels are the one sanctioned non-transceiver m-line.** `diag` and
+    `diag-dump` (`rtc/diag-channel.js`) must be created by the initiator **in the same task as
+    `createTransceivers()`**, before it, so there is exactly one initial offer. A data channel
+    created after negotiation, or on the answerer, is a finding (it triggers a second
+    negotiation and breaks the index-based transceiver adoption).
+24. **Re-apply quality after any mic `replaceTrack`.** A device switch, an AEC/NS/AGC change,
+    or the "release microphone" test goes through `restartMic` → `replaceTrack` → `finish()`.
+    `quality.apply()` must run after the `replaceTrack` and before the old track is stopped
+    (item 12 applied to the mic path). Missing it is a finding.
+
 ## Output format
 Report findings most-severe first. For each: file:line, what breaks, and the concrete sequence
 of events that triggers it. State plainly if a category is clean. Do not pad with style notes —

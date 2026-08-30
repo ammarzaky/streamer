@@ -7,6 +7,7 @@
  */
 
 import {
+  C2S,
   PROTOCOL_VERSION,
   SUBPROTOCOL,
   SIGNALING_PATH,
@@ -152,7 +153,7 @@ export function createSignalingClient({ onMessage, onStatus }) {
   function startPing() {
     stopPing();
     pingTimer = setInterval(() => {
-      if (socket?.readyState === WebSocket.OPEN) send('ping', {});
+      if (socket?.readyState === WebSocket.OPEN) send(C2S.PING, {});
     }, PING_INTERVAL_MS);
   }
 

@@ -20,6 +20,25 @@ test('the app launches and shows the Home screen @smoke', async () => {
   await app.close();
 });
 
+test('the Debug menu offers the Windows microphone status item', async () => {
+  // The OS mute check lives behind Core Audio, so the menu item only exists on Windows. The
+  // check itself is not exercised here: the suite runs with a fake capture device and must not
+  // depend on, or change, the mute state of the machine it runs on.
+  test.skip(process.platform !== 'win32', 'the Windows mute check is Windows only');
+
+  const app = await launchApp({ port: PORT });
+  await homeWindow(app);
+
+  const labels = await app.evaluate(({ Menu }) => {
+    const debug = Menu.getApplicationMenu()?.items.find((item) => item.label === 'Debug');
+    return debug?.submenu?.items.map((item) => item.label) ?? [];
+  });
+  expect(labels).toContain('Windows microphone status…');
+  expect(labels).toContain('Open log folder');
+
+  await app.close();
+});
+
 test('the link box validates as you type, before anything is pressed', async () => {
   const app = await launchApp({ port: PORT });
   const home = await homeWindow(app);
@@ -131,6 +150,107 @@ test('fullscreen works inside the desktop app, not just in a browser', async () 
   await expect
     .poll(() => home.evaluate(() => document.fullscreenElement?.id ?? null), { timeout: 15_000 })
     .toBe(null);
+
+  await app.close();
+});
+
+/**
+ * The window whose page URL contains `fragment`, once it has loaded.
+ *
+ * Polled from `app.windows()` rather than `app.waitForEvent('window')`: the event only reports
+ * windows that open *after* the wait begins, and the app opens windows unprompted -- the host
+ * panel appears by itself the moment a room id exists -- so an event-based wait either misses
+ * the window or catches the wrong one.
+ */
+async function windowLoading(app, fragment) {
+  let found;
+  await expect
+    .poll(
+      () => {
+        found = app.windows().find((page) => page.url().includes(fragment));
+        return Boolean(found);
+      },
+      { timeout: 30_000, message: `no window is loading ${fragment}` },
+    )
+    .toBe(true);
+  await found.waitForLoadState('domcontentloaded');
+  return found;
+}
+
+/** Host and create a room, returning the room window once it is on the real room URL. */
+async function hostRoom(app) {
+  const home = await homeWindow(app);
+  await home.getByTestId('host-button').click();
+  await home.waitForURL(`https://localhost:${PORT}/r/new`, { timeout: 45_000 });
+  await home.getByLabel('Your name').fill('Host');
+  await home.getByRole('button', { name: /create room/i }).click();
+  await home.waitForURL(new RegExp(`^https://localhost:${PORT}/r/[A-Za-z0-9_-]{8,}$`), {
+    timeout: 30_000,
+  });
+  // The host panel opens by itself on that navigation. Wait for it here so a test that opens a
+  // window of its own next is not racing against it.
+  await windowLoading(app, 'host.html');
+  return home;
+}
+
+test('the picker offers a system-audio checkbox that is on by default', async () => {
+  // Loopback capture only exists on Windows (desktop/capture.js), so the checkbox is only
+  // meaningful there. Elsewhere the test would be asserting a UI for a feature that cannot run.
+  test.skip(process.platform !== 'win32', 'system-audio loopback is Windows only');
+
+  const app = await launchApp({ port: PORT });
+  const home = await hostRoom(app);
+
+  await home.getByTestId('share-toggle').click();
+  const picker = await windowLoading(app, 'picker.html');
+
+  // Default on: sharing a screen without its sound is the surprise, not the other way round.
+  const systemAudio = picker.getByTestId('picker-system-audio');
+  await expect(systemAudio).toBeVisible();
+  await expect(systemAudio).toBeChecked();
+
+  // And the choice is honoured: untick it and the room must not end up with a display-audio
+  // track, or the "share audio" toggle is decoration.
+  await systemAudio.uncheck();
+  await expect(systemAudio).not.toBeChecked();
+
+  const sources = picker.getByTestId('picker-source');
+  await expect(sources.first()).toBeVisible({ timeout: 20_000 });
+  await sources.first().click();
+  await expect(picker.getByTestId('picker-share')).toBeEnabled();
+  await picker.getByTestId('picker-share').click();
+
+  await expect
+    .poll(() => home.evaluate(() => window.__app.share().sharerId === window.__app.selfId()), {
+      timeout: 20_000,
+      message: 'the share should start',
+    })
+    .toBe(true);
+  await expect
+    .poll(() => home.evaluate(() => window.__app.hasDisplayAudio()), {
+      timeout: 20_000,
+      message: 'unticking system audio must leave the share without an audio track',
+    })
+    .toBe(false);
+
+  await app.close();
+});
+
+test('the room shows the level bar and the mic device label in the desktop app', async () => {
+  // The level bar and the device label both depend on getUserMedia succeeding under Electron's
+  // permission handler -- the same class of main-process policy the fullscreen test guards.
+  // The browser suite cannot tell us whether the desktop app actually got a microphone.
+  const app = await launchApp({ port: PORT });
+  const home = await hostRoom(app);
+
+  await expect(home.getByTestId('room-meter')).toBeVisible({ timeout: 20_000 });
+
+  await expect
+    .poll(() => home.evaluate(() => window.__app.micSettings()?.label ?? ''), {
+      timeout: 20_000,
+      message: 'the microphone label should be known once the mic is acquired',
+    })
+    .not.toBe('');
 
   await app.close();
 });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { rmsLevel, smoothLevel, SPEAKING_THRESHOLD } from '../../public/js/media/level-meter.js';
+import { rmsLevel, smoothLevel, meterHealth, createLevelMeter, SPEAKING_THRESHOLD } from '../../public/js/media/level-meter.js';
 
 /** A sine wave of a given amplitude — a stand-in for someone speaking steadily. */
 const tone = (amplitude, n = 512) =>
@@ -58,4 +58,60 @@ test('smoothing converges and never escapes the range', () => {
   for (const seed of [NaN, undefined, null]) {
     assert.ok(Number.isFinite(smoothLevel(seed, 0.4)), `seed ${seed} produced a non-number`);
   }
+});
+
+// --- meterHealth -------------------------------------------------------------------------------
+
+test('a healthy meter with a running context reports running', () => {
+  assert.equal(meterHealth({ contextState: 'running' }), 'running');
+});
+
+test('a missing context state is treated as running rather than suspended', () => {
+  assert.equal(meterHealth({}), 'running');
+  assert.equal(meterHealth(), 'running');
+  assert.equal(meterHealth({ contextState: null }), 'running');
+});
+
+test('a suspended or closed context reports suspended', () => {
+  assert.equal(meterHealth({ contextState: 'suspended' }), 'suspended');
+  assert.equal(meterHealth({ contextState: 'closed' }), 'suspended');
+});
+
+test('a muted track or clone reports source-muted', () => {
+  assert.equal(meterHealth({ contextState: 'running', trackMuted: true }), 'source-muted');
+  assert.equal(meterHealth({ contextState: 'running', cloneMuted: true }), 'source-muted');
+});
+
+test('the dead flag or an ended track or clone reports dead', () => {
+  assert.equal(meterHealth({ contextState: 'running', dead: true }), 'dead');
+  assert.equal(meterHealth({ contextState: 'running', trackReadyState: 'ended' }), 'dead');
+  assert.equal(meterHealth({ contextState: 'running', cloneReadyState: 'ended' }), 'dead');
+  assert.equal(meterHealth({ contextState: 'running', trackReadyState: 'live', cloneReadyState: 'live' }), 'running');
+});
+
+test('health precedence is dead over source-muted over suspended over running', () => {
+  const everything = { contextState: 'suspended', trackMuted: true, cloneMuted: true, dead: true };
+  assert.equal(meterHealth(everything), 'dead');
+  assert.equal(meterHealth({ ...everything, dead: false }), 'source-muted');
+  assert.equal(meterHealth({ ...everything, dead: false, trackMuted: false, cloneMuted: false }), 'suspended');
+  assert.equal(meterHealth({ contextState: 'running' }), 'running');
+});
+
+// --- createLevelMeter early return -------------------------------------------------------------
+
+test('creating a meter with no track returns a dead meter without touching the window', () => {
+  assert.equal(typeof globalThis.window, 'undefined', 'this test relies on a pure Node environment');
+  const reports = [];
+  const meter = createLevelMeter(null, () => {}, { onState: (s) => reports.push(s) });
+
+  assert.equal(typeof meter.stop, 'function');
+  assert.equal(typeof meter.state, 'function');
+  const snapshot = meter.state();
+  assert.equal(snapshot.dead, true);
+  assert.equal(snapshot.reason, 'no-track');
+  assert.equal(snapshot.health, 'dead');
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].reason, 'no-track');
+  assert.doesNotThrow(() => meter.stop());
+  assert.doesNotThrow(() => meter.stop());
 });

@@ -76,6 +76,19 @@ export const EVENTS = Object.freeze({
   INTENT_TOGGLE_STATS: 'intent:toggle-stats',
   INTENT_JOIN: 'intent:join',
 
+  // Audio diagnostics. All of them exist because "nobody can hear me" was undiagnosable
+  // three times running; see docs/DIAGNOSTICS.md.
+  INTENT_SET_MIC_DEVICE: 'intent:set-mic-device',
+  INTENT_SET_MIC_PROCESSING: 'intent:set-mic-processing',
+  INTENT_TOGGLE_MIC_MENU: 'intent:toggle-mic-menu',
+  INTENT_MIC_SELFTEST: 'intent:mic-selftest',
+  INTENT_AUDIO_CHECK: 'intent:audio-check',
+  INTENT_COPY_DIAGNOSTICS: 'intent:copy-diagnostics',
+  INTENT_TOGGLE_INCOMING_AUDIO_TEST: 'intent:toggle-incoming-audio-test',
+  INTENT_RESUME_AUDIO: 'intent:resume-audio',
+  INTENT_RELEASE_MIC_TEST: 'intent:release-mic-test',
+  INTENT_REQUEST_PEER_DIAGNOSTICS: 'intent:request-peer-diagnostics',
+
   // Facts, emitted by the engine.
   SIGNALING_STATUS: 'signaling:status',
   ROOM_STATE: 'room:state',
@@ -87,4 +100,6 @@ export const EVENTS = Object.freeze({
   ERROR: 'app:error',
   TOAST: 'app:toast',
   FATAL: 'app:fatal',
+  /** A remote <audio> element refused to play (autoplay policy, usually). */
+  AUDIO_PLAYBACK_BLOCKED: 'audio:playback-blocked',
 });

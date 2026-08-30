@@ -70,6 +70,10 @@ otherwise.
   the previous share rather than just relabelling it.
 - **Mute and unmute your microphone.** Muting your mic does *not* silence the audio of whatever
   you are sharing; they are separate.
+- **Pick your microphone and see it working.** A microphone picker in the lobby and in the
+  room, a level bar that is always visible (inside the Mute button and on your own tile, and it
+  keeps moving while you are muted), and an **Audio check** with a plain verdict — "they can
+  hear you", "mic open but silent", "playback blocked" — plus a one-click diagnostics dump.
 - **See who is in the room**, who is muted, who is sharing, and whether each connection is
   healthy.
 - **A stats panel** showing bitrate, frame rate, resolution, connection type, and — the useful
@@ -148,7 +152,19 @@ That traffic goes browser-to-browser.
 if you are the host and you reload the page, you get your role back instead of handing it to
 someone else. It is per-tab, disappears when you close the tab, and is deleted when you leave.
 No cookies, no `localStorage`, no IndexedDB, no cache. There is an automated test asserting
-exactly that, and it fails if anything else appears.
+exactly that, and it fails if anything else appears. The audio diagnostics add nothing to
+this: the level meter, device list and verdicts live in page memory only.
+
+**What the audio diagnostics expose:** read-only accessors on `window.__app` (`audio()`,
+`micSettings()`, `micLevel()`, `devices()`, `diagnostics()`, …) are always installed, so a
+person with the console open can read the same numbers the panel shows. They cannot change
+anything; the hooks that can are installed only under the E2E test flag. "Can they hear me"
+and "request their diagnostics" travel **peer-to-peer over an RTCDataChannel** on the same
+connection as the audio — never through the server, which sees none of it.
+
+**What the desktop app writes to disk:** one small log, `logs/desktop.log` under its user-data
+folder, recording permission decisions and screen-picker choices (what was shared, whether
+system audio was included). No audio, no video, no content.
 
 **Two caveats worth stating rather than burying:**
 
@@ -197,7 +213,7 @@ which networks (CGNAT, symmetric NAT, most mobile carriers) simply cannot do it 
 | `npm run links` | Print the addresses to share and the certificate fingerprint |
 | `npm run certs` | Regenerate certificates (automatic on first run) |
 | `npm run certs:check` | Verify the certificate still covers this machine's addresses |
-| `npm test` | Lint, unit, integration, certificates, and browser tests — one verdict |
+| `npm test` | Lint, unit, integration, certificates, browser and desktop tests — one verdict |
 | `npm run test:unit` | The fast tests only |
 | `npm run test:e2e` | The browser tests only |
 

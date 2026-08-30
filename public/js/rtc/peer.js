@@ -15,9 +15,10 @@
  *    the whole "quality changes are instant" property goes with it.
  */
 
-import { ERRORS } from '../../shared/protocol.js';
+import { C2S, ERRORS } from '../../shared/protocol.js';
 import { AppError } from '../core/errors.js';
 import { logger } from '../core/logger.js';
+import { DIAG_LABEL, DUMP_LABEL } from './diag-channel.js';
 
 /** Remote candidates that arrive before the remote description is set are queued. The cap
  *  stops a misbehaving or malicious peer growing this without bound. */
@@ -55,6 +56,7 @@ export function createPeer({
   onStateChange,
   onFailed,
   onNegotiated,
+  onDiagMessage,
 }) {
   const pc = new RTCPeerConnection({
     iceServers,
@@ -95,6 +97,18 @@ export function createPeer({
   let restartAttempts = 0;
   let reportedFailed = false;
   let closed = false;
+
+  /**
+   * Diagnostics channels, so the other side can tell us whether it hears us.
+   *
+   * Two, because they want opposite delivery: `diag` carries a once-a-second report where a
+   * lost frame is worth less than a late one (unordered, no retransmits), and `diag-dump`
+   * carries a chunked diagnostics blob that must arrive whole (ordered, reliable). They ride
+   * the same connection as the media -- no signaling message, no server change -- and create
+   * no transceiver, so the index-based adoption below is untouched. See diag-channel.js.
+   */
+  let diag = null;
+  let dump = null;
 
   // -------------------------------------------------------------------------
   // Transceivers
@@ -147,6 +161,86 @@ export function createPeer({
   const sender = (role) => tx.get(role)?.sender ?? null;
 
   /**
+   * Every transceiver's negotiated state, by role. `currentDirection` is the one that matters:
+   * a sender whose m-line negotiated to recvonly reports `connected`, holds a live track, and
+   * sends nothing -- which is invisible from every other field.
+   */
+  function transceiverSnapshot() {
+    return [...tx.entries()].map(([role, transceiver]) => ({
+      role,
+      mid: transceiver.mid,
+      direction: transceiver.direction,
+      currentDirection: transceiver.currentDirection,
+      senderTrackId: transceiver.sender.track?.id ?? null,
+      senderTrackEnabled: transceiver.sender.track?.enabled ?? null,
+      senderTrackReadyState: transceiver.sender.track?.readyState ?? null,
+      receiverTrackId: transceiver.receiver.track?.id ?? null,
+      receiverTrackMuted: transceiver.receiver.track?.muted ?? null,
+      receiverTrackReadyState: transceiver.receiver.track?.readyState ?? null,
+    }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Diagnostics channels
+  // -------------------------------------------------------------------------
+
+  function wireChannel(channel, kind) {
+    channel.addEventListener('open', () => logger.debug('peer: diag channel open', { peerId, kind }));
+    channel.addEventListener('close', () => logger.debug('peer: diag channel closed', { peerId, kind }));
+    channel.addEventListener('message', (event) => {
+      if (closed || typeof event.data !== 'string') return;
+      onDiagMessage?.({ peerId, kind, data: event.data });
+    });
+  }
+
+  function createDiagChannels() {
+    try {
+      diag = pc.createDataChannel(DIAG_LABEL, { ordered: false, maxRetransmits: 0 });
+      wireChannel(diag, 'diag');
+      dump = pc.createDataChannel(DUMP_LABEL, { ordered: true });
+      wireChannel(dump, 'dump');
+    } catch (err) {
+      // A browser without data channels still gets a working call; it just cannot report.
+      logger.warn('peer: diag channels unavailable', { peerId, error: err?.message });
+    }
+  }
+
+  pc.addEventListener('datachannel', ({ channel }) => {
+    if (channel.label === DIAG_LABEL) {
+      diag = channel;
+      wireChannel(channel, 'diag');
+    } else if (channel.label === DUMP_LABEL) {
+      dump = channel;
+      wireChannel(channel, 'dump');
+    }
+  });
+
+  function sendDiag(text) {
+    if (closed || diag?.readyState !== 'open') return false;
+    try {
+      diag.send(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function sendDump(frames) {
+    if (closed || dump?.readyState !== 'open') return false;
+    try {
+      for (const frame of frames) dump.send(frame);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  const diagState = () => ({
+    diag: diag?.readyState ?? 'none',
+    dump: dump?.readyState ?? 'none',
+  });
+
+  /**
    * Attach or clear a track without renegotiating.
    *
    * Always records the intent first, so an attach that arrives before the transceivers exist
@@ -195,7 +289,7 @@ export function createPeer({
       // No argument: the browser composes the offer from current state. Setting an explicit
       // offer here is what breaks rollback.
       await pc.setLocalDescription();
-      send('offer', { to: peerId, description: pc.localDescription });
+      send(C2S.OFFER, { to: peerId, description: pc.localDescription });
     } catch (err) {
       logger.error('peer: negotiationneeded failed', { peerId, error: err?.message });
     } finally {
@@ -208,7 +302,7 @@ export function createPeer({
   pc.addEventListener('icecandidate', ({ candidate }) => {
     // A null candidate is end-of-candidates and is forwarded as such -- the peer uses it to
     // stop waiting.
-    send('ice-candidate', { to: peerId, candidate: candidate ? candidate.toJSON() : null });
+    send(C2S.ICE_CANDIDATE, { to: peerId, candidate: candidate ? candidate.toJSON() : null });
   });
 
   pc.addEventListener('track', (event) => {
@@ -285,7 +379,7 @@ export function createPeer({
       if (isOffer) {
         if (tx.size === 0) await adoptTransceivers();
         await pc.setLocalDescription();
-        send('answer', { to: peerId, description: pc.localDescription });
+        send(C2S.ANSWER, { to: peerId, description: pc.localDescription });
         // Encoder parameters are reset by negotiation, so whoever owns them is told to
         // re-apply. Without this an ICE restart silently drops the bitrate cap, the scale
         // factor and the degradation preference.
@@ -295,6 +389,10 @@ export function createPeer({
       // An answer completes a negotiation we started, and resets encoder parameters just as
       // an inbound offer does.
       if (!isOffer) onNegotiated?.(peerId);
+
+      // What each m-line actually negotiated to. Logged every time because the direction is
+      // the one thing that can make a healthy-looking sender send nothing.
+      logger.info('audio: transceivers', { peerId, after: description.type, transceivers: transceiverSnapshot() });
 
       await flushCandidates();
     });
@@ -469,7 +567,14 @@ export function createPeer({
   function start() {
     // Only the initiator builds the m-lines. The answerer adopts them, so if both sides
     // created transceivers the SDP would carry six.
-    if (youInitiate) createTransceivers();
+    //
+    // The diagnostics channels are created in the SAME task, before the transceivers, so
+    // both land in the one initial offer: negotiationneeded is queued once per task, and a
+    // channel created later would cost a second negotiation for telemetry.
+    if (youInitiate) {
+      createDiagChannels();
+      createTransceivers();
+    }
   }
 
   function close() {
@@ -494,6 +599,15 @@ export function createPeer({
     }
 
     try {
+      diag?.close();
+      dump?.close();
+    } catch {
+      // Already closed with the connection.
+    }
+    diag = null;
+    dump = null;
+
+    try {
       pc.close();
     } catch {
       // Closing twice is not an error worth reporting.
@@ -515,6 +629,10 @@ export function createPeer({
     sender,
     handleDescription,
     handleCandidate,
+    transceiverSnapshot,
+    sendDiag,
+    sendDump,
+    diagState,
 
     get connectionState() {
       return pc.connectionState;

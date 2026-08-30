@@ -15,6 +15,8 @@ const el = {
   share: document.getElementById('share'),
   cancel: document.getElementById('cancel'),
   audioNote: document.getElementById('audio-note'),
+  audioOption: document.getElementById('audio-option'),
+  systemAudio: document.getElementById('system-audio'),
   tabs: [...document.querySelectorAll('[role="tab"]')],
 };
 
@@ -22,9 +24,13 @@ let sources = [];
 let kind = 'screen';
 let selectedId = null;
 
+// The checkbox exists because of what "system audio" means on Windows: the whole mix this PC
+// plays, INCLUDING the voices of the people in the call, who then hear themselves echoed back.
+// Sharing a film wants it on; a voice-only session where people complain of echo wants it off.
+el.audioOption.hidden = bridge.platform !== 'win32';
 el.audioNote.textContent =
   bridge.platform === 'win32'
-    ? 'This computer’s audio is shared too. Your microphone stays separate.'
+    ? 'Includes everything this PC plays — including the voices of the people in this call, who will hear themselves echoed back. Untick it, or use headphones, if they complain. Your microphone stays separate.'
     : 'Audio cannot be captured from the screen on this platform. Your microphone still works.';
 
 // ---------------------------------------------------------------------------
@@ -96,7 +102,7 @@ function tile(source) {
 
 function confirmShare() {
   if (!selectedId) return;
-  bridge.chooseSource(selectedId);
+  bridge.chooseSource(selectedId, { systemAudio: el.systemAudio.checked });
 }
 
 el.share.addEventListener('click', confirmShare);

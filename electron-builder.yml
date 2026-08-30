@@ -26,6 +26,13 @@ files:
   - '!test-results/**'
   - '!certs/**' # generated per machine into userData; shipping one would be a shared private key
 
+# The Windows microphone-mute helper (desktop/win/mic-endpoint.ps1) is run by powershell.exe,
+# which reads it from disk by path -- something an asar archive cannot serve. Inert while `asar`
+# is off above; the day it is turned on, this keeps the script a real file under
+# app.asar.unpacked, which is where desktop/mic-status.js looks for it in that layout.
+asarUnpack:
+  - desktop/win/**
+
 # Where updates come from.
 #
 # A PUBLIC repository on purpose: electron-updater reads public releases with no credentials,

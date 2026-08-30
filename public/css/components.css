@@ -169,6 +169,23 @@
   color: var(--danger);
 }
 
+/* The lobby microphone line carries the check's verdict: amber when the device is open but has
+   delivered nothing for six seconds, red when it could not be opened at all. */
+.field__hint--warn {
+  color: var(--warn);
+}
+
+.field__hint--danger {
+  color: var(--danger);
+}
+
+/* The bilingual hint's English span sets its own colour (.diag__en); the severity colour must
+   win on both halves, or only the Arabic sentence turns amber. */
+.field__hint--warn .diag__en,
+.field__hint--danger .diag__en {
+  color: inherit;
+}
+
 .input {
   width: 100%;
   padding: var(--space-2) var(--space-3);
@@ -818,4 +835,203 @@
   padding: 6px 12px;
   font-size: 13px;
   min-width: 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Audio diagnostics
+ *
+ * The always-visible mic bar, the mic menu, the per-peer "can hear you" line, the audio check
+ * dialog. All of it exists because "nobody can hear me" went undiagnosed three times.
+ * ------------------------------------------------------------------------ */
+
+.ctl-group {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+}
+
+/* A thin bar under the label, inside the 56px button. Green live, amber muted, red dead. */
+.meter--ctl {
+  display: block;
+  width: 44px;
+  height: 4px;
+  margin-top: 2px;
+}
+
+.meter--ctl .meter__fill {
+  display: block;
+}
+
+.ctl--caret {
+  width: 22px;
+  min-width: 22px;
+  padding: 0;
+  font-size: 11px;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+
+/* The verdict line sits above the group, over the stage edge, and never steals a click. */
+.ctl__hint {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  border: 1px solid var(--line-2);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.ctl__hint--warn {
+  color: var(--warn);
+}
+.ctl__hint--danger {
+  color: var(--danger);
+}
+.ctl__hint--ok {
+  color: var(--ok);
+}
+
+.mic-menu {
+  left: 0;
+  right: auto;
+  width: 340px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.mic-menu__section {
+  padding: var(--space-2) var(--space-3) var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.mic-menu__check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+  text-align: left;
+}
+
+.mic-menu__note {
+  padding: 0 var(--space-3) var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* Self tile: a small bar under the name. Looked up by selector on every tick because tiles
+   re-render on every 'self' emit -- a cached node would go stale silently. */
+.meter--tile {
+  width: 48px;
+  height: 4px;
+  margin-top: 3px;
+}
+
+.tile__hear {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+.tile__hear--ok {
+  color: var(--ok);
+}
+.tile__hear--bad {
+  color: var(--danger);
+}
+.tile__hear--warn {
+  color: var(--warn);
+}
+
+.stats__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+/* The audio check dialog and the diagnostics text fallback. */
+.dialog--wide {
+  width: min(600px, 94vw);
+}
+
+.diag__step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.diag__ar {
+  direction: rtl;
+  text-align: right;
+  font-size: var(--text-base);
+  line-height: 1.7;
+}
+
+.diag__en {
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.diag__proof {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  white-space: pre-wrap;
+}
+
+.diag__meter {
+  margin: var(--space-2) 0;
+}
+
+.diag__choices {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.diag__textarea {
+  width: 100%;
+  min-height: 220px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  background: var(--surface-1);
+  color: var(--text-1);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+}
+
+.banner__text--bi {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.banner__text--bi .diag__ar {
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.banner__text--bi .diag__en {
+  font-size: var(--text-xs);
+}
+
+.input--sm {
+  padding: 6px 10px;
+  font-size: var(--text-sm);
+  margin-top: 4px;
+}
+
+.meter--tile,
+.meter--tile .meter__fill {
+  display: block;
 }

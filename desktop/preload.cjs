@@ -43,7 +43,7 @@ if (isLocalPage) {
 
     // Screen picker
     listSources: () => call('picker:sources'),
-    chooseSource: (id) => ipcRenderer.send('picker:choose', id),
+    chooseSource: (id, options) => ipcRenderer.send('picker:choose', id, options ?? {}),
     cancelPicker: () => ipcRenderer.send('picker:cancel'),
 
     // Updates

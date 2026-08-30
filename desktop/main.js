@@ -14,17 +14,51 @@
  *   - the ability to run the signaling server itself, from `src/index.js`, unmodified
  */
 
-import { app, BrowserWindow, ipcMain, powerSaveBlocker, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, powerSaveBlocker, session, shell } from 'electron';
 import { pathToFileURL } from 'node:url';
 import { networkInterfaces } from 'node:os';
+import { appendFileSync, mkdirSync } from 'node:fs';
+import path from 'node:path';
 
 import * as paths from './paths.js';
 import * as certs from './certs.js';
 import * as upnp from './upnp.js';
 import * as tunnel from './tunnel.js';
 import * as updater from './updater.js';
-import { installCapture } from './capture.js';
+import { installCapture, setCaptureLogger } from './capture.js';
+import { readMicStatus, unmuteMic, setMicStatusLogger } from './mic-status.js';
+import { isLocalPageUrl } from './local-page.js';
 import { formatInvite, browserInvite, parseInvite, roomUrl, InviteError } from './shared/invite.js';
+
+// ---------------------------------------------------------------------------
+// Main-process log
+// ---------------------------------------------------------------------------
+
+/**
+ * A small append-only log under userData, for the decisions only the main process sees:
+ * permission grants and denials, what the picker chose and whether it carried system audio.
+ * Every one of those has been the invisible half of an audio bug report. Never SDP, never
+ * addresses, never the fingerprint.
+ */
+let logFile = null;
+
+function logDir() {
+  return path.join(app.getPath('userData'), 'logs');
+}
+
+function desktopLog(event, detail = {}) {
+  const line = `${new Date().toISOString()} ${event} ${JSON.stringify(detail)}\n`;
+  console.log(`[desktop] ${event}`, detail);
+  try {
+    if (!logFile) {
+      mkdirSync(logDir(), { recursive: true });
+      logFile = path.join(logDir(), 'desktop.log');
+    }
+    appendFileSync(logFile, line);
+  } catch {
+    // A log that cannot be written must not take the app down with it.
+  }
+}
 
 // Remote video must start without a click. The web app relies on the same relaxation in its
 // test browser, and a room where the first frame never paints looks like a broken connection.
@@ -207,7 +241,89 @@ const safeProtocol = (url) => {
   }
 };
 
-const isLocalPage = (url) => url.startsWith(pathToFileURL(paths.ui('')).href.replace(/\/$/, ''));
+const safeOrigin = (url) => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return '';
+  }
+};
+
+/**
+ * A Debug menu, hidden behind Alt like the rest of the auto-hidden bar.
+ *
+ * "Open log folder" is the cheapest way to get the main-process log into a bug report. The
+ * Chromium internals pages are the deepest view of audio there is -- media-internals lists the
+ * exact capture device and parameters Chromium opened, which no renderer API exposes -- but
+ * they render blank in some Electron versions, so each is verified on first use and reported
+ * honestly rather than promised.
+ */
+function installDebugMenu() {
+  const openInternals = (url) => {
+    const page = new BrowserWindow({
+      width: 1100,
+      height: 800,
+      autoHideMenuBar: true,
+      title: url,
+      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    });
+    guardNavigation(page);
+    page.webContents.on('did-fail-load', (_event, code, description) => {
+      desktopLog('internals-page-failed', { url, code, description });
+    });
+    // A WebUI page that "loads" blank is the common failure and fires no error, so the
+    // rendered text is measured after load and an empty page is reported as such.
+    page.webContents.once('did-finish-load', () => {
+      page.webContents
+        .executeJavaScript('document.body ? document.body.innerText.trim().length : 0', true)
+        .then((textLength) => {
+          if (!textLength) {
+            desktopLog('internals-page-blank', { url });
+            void dialog.showMessageBox(page, {
+              type: 'info',
+              message: `${url} rendered blank in this Electron build.`,
+              detail: 'Use Copy diagnostics in the room instead; it carries the same audio numbers.',
+            });
+          }
+        })
+        .catch((error) => desktopLog('internals-page-blank', { url, error: error?.message }));
+    });
+    void page.loadURL(url).catch((error) => desktopLog('internals-page-failed', { url, error: error?.message }));
+  };
+
+  // The default roles are kept: replacing the menu wholesale would also remove Reload, zoom
+  // and the other accelerators the packaged app has always had.
+  const template = [
+    { role: 'fileMenu' },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+    {
+      label: 'Debug',
+      submenu: [
+        { label: 'Open log folder', click: () => void shell.openPath(logDir()) },
+        { type: 'separator' },
+        { label: 'Open WebRTC internals', click: () => openInternals('chrome://webrtc-internals') },
+        { label: 'Open media internals (capture devices)', click: () => openInternals('chrome://media-internals') },
+        // The OS mute check exists only where Core Audio does.
+        ...(process.platform === 'win32'
+          ? [
+              { type: 'separator' },
+              {
+                label: 'Windows microphone status…',
+                click: () => void showMicStatus().catch((error) => desktopLog('mic-status', { error: describeError(error) })),
+              },
+            ]
+          : []),
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+/** The file:// prefix all of our own pages sit under. The comparison itself is in local-page.js. */
+const localPagePrefix = () => pathToFileURL(paths.ui('')).href.replace(/\/$/, '');
+const isLocalPage = (url) => isLocalPageUrl(url, localPagePrefix());
 
 function sameOrigin(url, origin) {
   try {
@@ -634,6 +750,196 @@ handle('open-external', (url) => {
 });
 
 // ---------------------------------------------------------------------------
+// Windows microphone mute
+// ---------------------------------------------------------------------------
+
+/**
+ * A microphone muted in Windows opens without error and streams silence (see mic-status.js).
+ * Chromium does report that mute on the track (`track.muted`, polled once a second), so the page
+ * names it first; this is the second line of defence: a definitive Core Audio read that also
+ * catches an input volume of 0 -- as silent, and invisible to the track -- and the one place an
+ * unmute can be offered with a click. So the first time a page load is granted the microphone --
+ * the lobby's getUserMedia; lobby and room are one document, and Join adopts the lobby stream --
+ * Windows is asked once about the default endpoint, and told to unmute it on request. Once per
+ * document, not per grant: every later getUserMedia of the same page (a mic-menu device switch,
+ * a processing toggle, the release-for-3-s test) would otherwise re-open the same box mid-call,
+ * and the read is of the Windows default, which need not be the device the page opened. A full
+ * navigation (the next room visit) checks again. Skipped under the test flag: the suites run on
+ * a fake capture device and must neither depend on nor change the mute state of the machine
+ * running them.
+ */
+const micCheckEnabled = () => process.platform === 'win32' && process.env.STREAMER_DESKTOP_TEST !== '1';
+
+/** The documents already checked this load, and the check in flight, if any. */
+const micChecked = new WeakSet();
+let micCheck = null;
+/** "Don't ask again while the app is open" -- a variable, on purpose. Nothing is persisted. */
+let micDialogSuppressed = false;
+/** The warning box currently open, so a second grant cannot stack another on top of it. */
+let micDialog = null;
+
+/** A window that can still own a dialog, or null -- showMessageBox throws on a destroyed one. */
+const alive = (target_) => (target_ && !target_.isDestroyed() ? target_ : null);
+
+const describeError = (error) => error?.message ?? String(error);
+
+/**
+ * What the warning is about: the mute flag, or an input volume of 0 -- every bit as silent, but
+ * not a mute, so the helper cannot clear it and the box points at Settings instead.
+ */
+const micProblem = (status) => (status.muted ? 'muted' : status.volume === 0 ? 'volume-zero' : null);
+
+/** One line per endpoint for the Debug box: the default starred, then muted / volume. */
+const describeEndpoints = (endpoints) =>
+  endpoints.map(
+    (endpoint) =>
+      `${endpoint.isDefault ? '★' : '•'} ${endpoint.name || '(unnamed)'} — ` +
+      `${endpoint.muted ? 'مكتوم / muted' : 'غير مكتوم / not muted'} · ${endpoint.volume}%`,
+  );
+
+function checkMicAfterGrant(contents) {
+  if (!micCheckEnabled() || micCheck || micChecked.has(contents)) return;
+  micChecked.add(contents);
+  // Main-frame 'did-navigate' is the next full navigation; in-page navigations do not fire it.
+  contents.once('did-navigate', () => micChecked.delete(contents));
+
+  const owner = BrowserWindow.fromWebContents(contents);
+  micCheck = readMicStatus()
+    .then((status) => (status && micProblem(status) ? offerUnmute(owner, status) : undefined))
+    .catch((error) => desktopLog('mic-mute-dialog', { error: describeError(error) }))
+    .finally(() => {
+      micCheck = null;
+    });
+}
+
+/**
+ * The warning box for a default endpoint that is muted or at volume 0. Resolves once it is
+ * closed and any unmute has been tried. "Unmute now" is offered only for the mute flag: a volume
+ * of 0 has to be raised by hand in Settings.
+ */
+function offerUnmute(owner, status) {
+  if (micDialogSuppressed) {
+    desktopLog('mic-mute-dialog', { choice: 'skipped', suppressed: true });
+    return Promise.resolve();
+  }
+  if (micDialog) return micDialog;
+
+  const parent = alive(owner) ?? alive(win);
+  const device = status.name || 'default microphone';
+  const problem = micProblem(status);
+  const buttons = status.muted ? ['إلغاء الكتم الآن — Unmute now', 'تجاهل — Ignore'] : ['تجاهل — Ignore'];
+  micDialog = dialog
+    .showMessageBox(parent, {
+      type: 'warning',
+      title: 'Streamer',
+      // Names what was read -- the Windows default -- because the app's mic menu may have opened
+      // another device, in which case this is no mute of "your microphone".
+      message: status.muted
+        ? `ميكروفون ويندوز الافتراضي (${device}) مكتوم — إن كان التطبيق يستخدمه فلن يسمعك أحد\n` +
+          `The Windows default microphone (${device}) is muted — if this app is using it, nobody will hear you`
+        : `مستوى صوت ميكروفون ويندوز الافتراضي (${device}) صفر — إن كان التطبيق يستخدمه فلن يسمعك أحد\n` +
+          `The Windows default microphone (${device}) input volume is 0 — if this app is using it, nobody will hear you`,
+      detail: [
+        `الجهاز: ${device} — مستوى الصوت ${status.volume}%`,
+        ...(status.muted
+          ? [
+              'لإلغاء الكتم: اضغط زر كتم الميكروفون في صف مفاتيح F (يضيء مصباحه أثناء الكتم)، أو افتح ' +
+                'الإعدادات › النظام › الصوت › الإدخال › الجهاز وألغِ الكتم.',
+            ]
+          : []),
+        ...(status.volume === 0
+          ? ['مستوى صوت الإدخال صفر؛ يجب رفعه من الإعدادات › النظام › الصوت › الإدخال › الجهاز.']
+          : []),
+        'إذا اخترت ميكروفونًا مختلفًا داخل التطبيق، فافحص ذلك الميكروفون في الإعدادات.',
+        '',
+        `Device: ${device} — volume ${status.volume}%`,
+        ...(status.muted
+          ? [
+              'To unmute: press the microphone-mute key on the F row (its light is on while muted), or open ' +
+                'Settings › System › Sound › Input › the device and unmute it.',
+            ]
+          : []),
+        ...(status.volume === 0
+          ? ['The input volume is 0; it must be raised in Settings › System › Sound › Input › the device.']
+          : []),
+        'If a different microphone was picked inside the app, check that one in Settings.',
+      ].join('\n'),
+      buttons,
+      defaultId: 0,
+      cancelId: buttons.length - 1,
+      noLink: true,
+      checkboxLabel: "لا تسألني مجددًا أثناء تشغيل التطبيق — Don't ask again while the app is open",
+      checkboxChecked: false,
+    })
+    .then(({ response, checkboxChecked }) => {
+      micDialogSuppressed = checkboxChecked;
+      const choice = status.muted && response === 0 ? 'unmute' : 'ignore';
+      desktopLog('mic-mute-dialog', { choice, problem, suppressed: checkboxChecked });
+      return choice === 'unmute' ? performUnmute(parent) : undefined;
+    })
+    .catch((error) => desktopLog('mic-mute-dialog', { error: describeError(error) }))
+    .finally(() => {
+      micDialog = null;
+    });
+  return micDialog;
+}
+
+/** Clear the flag through the helper (which logs `mic-unmute`) and say so if it did not take. */
+async function performUnmute(parent) {
+  const after = await unmuteMic();
+  if (after && !after.muted) return;
+  await dialog.showMessageBox(alive(parent) ?? alive(win), {
+    type: 'error',
+    title: 'Streamer',
+    message: 'تعذّر إلغاء كتم الميكروفون\nCould not unmute the microphone',
+    detail: after
+      ? 'ما زال مكتومًا في ويندوز. استخدم زر كتم الميكروفون على لوحة المفاتيح، أو الإعدادات › النظام › الصوت › الإدخال.\n' +
+        'It is still muted in Windows. Use the microphone-mute key, or Settings › System › Sound › Input.'
+      : 'لم يستجب ويندوز؛ السبب في Debug › Open log folder. استخدم زر كتم الميكروفون، أو الإعدادات › النظام › الصوت › الإدخال.\n' +
+        'Windows did not answer; the reason is under Debug › Open log folder. Use the microphone-mute key, or Settings › System › Sound › Input.',
+  });
+}
+
+/** Debug › Windows microphone status…: the same read, on demand, with every endpoint listed. */
+async function showMicStatus() {
+  const status = await readMicStatus();
+  const parent = alive(win);
+  if (!status) {
+    await dialog.showMessageBox(parent, {
+      type: 'error',
+      title: 'Streamer',
+      message: 'تعذّرت قراءة حالة الميكروفون من ويندوز\nCould not read the Windows microphone status',
+      detail: 'السبب مسجّل في desktop.log: Debug › Open log folder.\nThe reason is in desktop.log: Debug › Open log folder.',
+    });
+    return;
+  }
+  const { response } = await dialog.showMessageBox(parent, {
+    type: micProblem(status) ? 'warning' : 'info',
+    title: 'Streamer',
+    message: 'حالة الميكروفون في ويندوز\nWindows microphone status',
+    detail: [
+      `الجهاز الافتراضي / Default device: ${status.name || '(unnamed)'}`,
+      `مكتوم / Muted: ${status.muted ? 'نعم / yes' : 'لا / no'}`,
+      `مستوى الصوت / Volume: ${status.volume}%`,
+      ...(status.volume === 0
+        ? [
+            'مستوى صوت الإدخال صفر؛ ارفعه من الإعدادات › النظام › الصوت › الإدخال.\n' +
+              'The input volume is 0; raise it in Settings › System › Sound › Input.',
+          ]
+        : []),
+      '',
+      'كل الميكروفونات النشطة / All active microphones (★ = الافتراضي / default):',
+      ...describeEndpoints(status.endpoints),
+    ].join('\n'),
+    buttons: status.muted ? ['إلغاء الكتم — Unmute', 'إغلاق — Close'] : ['إغلاق — Close'],
+    defaultId: 0,
+    cancelId: status.muted ? 1 : 0,
+    noLink: true,
+  });
+  if (status.muted && response === 0) await performUnmute(parent);
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
 
@@ -654,7 +960,10 @@ app.whenReady().then(() => {
     lastRejection = { ...event, hostname: event.hostname.toLowerCase() };
   });
 
+  setCaptureLogger(desktopLog);
+  setMicStatusLogger(desktopLog);
   installCapture(session.defaultSession, () => win);
+  installDebugMenu();
 
   // Updates are pushed to whichever local page is showing, so the Home screen can react without
   // polling. Checking at launch is safe because nothing downloads without being asked.
@@ -664,6 +973,10 @@ app.whenReady().then(() => {
     }
   });
   void updater.check();
+
+  // Logged once at start, so a bug report's desktop.log opens with the answer. Nothing waits on
+  // it, and a failure is a log line rather than an exception.
+  if (micCheckEnabled()) void readMicStatus();
 
   // Only our own pages and the server we are connected to may use the microphone or the screen.
   // Electron grants media permissions by default, which would mean any page the window ever ends
@@ -676,7 +989,17 @@ app.whenReady().then(() => {
     // has no Electron permission handler to deny it.
     const allowed = ['media', 'display-capture', 'clipboard-sanitized-write', 'fullscreen'];
     const trusted = isLocalPage(url) || (target && sameOrigin(url, target.origin));
-    callback(Boolean(trusted) && allowed.includes(permission));
+    const granted = Boolean(trusted) && allowed.includes(permission);
+    // Every decision is logged, because a denied 'media' request is indistinguishable from a
+    // broken microphone from inside the page.
+    desktopLog('permission', { permission, origin: safeOrigin(url), trusted: Boolean(trusted), granted });
+    callback(granted);
+    // The first granted 'media' of a page load is the lobby opening the microphone: the moment
+    // to ask Windows whether the default microphone is muted or at volume 0. The page sees the
+    // mute too (track.muted); this is the definitive read behind it, and the only place an
+    // unmute can be offered. Later grants of the same document are re-acquires and are not
+    // checked again.
+    if (granted && permission === 'media') checkMicAfterGrant(contents);
   });
 
   createWindow();

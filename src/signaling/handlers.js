@@ -80,6 +80,9 @@ function join(ctx, message) {
     {
       roomId: room.id,
       selfId: peer.id,
+      // Our own joinOrder, so the client can explain negotiation roles in its diagnostics
+      // without recomputing them. room-created carries it too.
+      joinOrder: peer.joinOrder,
       isHost: room.hostPeerId === peer.id || hostOutcome === HOST_CHANGE_REASON.PROMOTED,
       hostPeerId: hostOutcome === HOST_CHANGE_REASON.PROMOTED ? peer.id : room.hostPeerId,
       maxParticipants: ctx.config.rooms.maxParticipants,

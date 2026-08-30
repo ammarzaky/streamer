@@ -153,3 +153,66 @@ test('cancelling the picker leaves the app usable rather than stuck', async () =
 
   await hostApp.close();
 });
+
+test('the guest hears the host as sound', async () => {
+  // Two participants counting each other proves signaling; it does not prove that a single
+  // audio sample crossed the wire. The desktop app runs with a fake microphone that produces a
+  // tone, so once the host unmutes the guest's decoder must report rising audio energy, and the
+  // guest's report back must make the host's stats row say the guest can hear them.
+  const hostApp = await launchApp({ port: PORT });
+  const { main: hostWin, link } = await openRoom(hostApp);
+
+  const guestApp = await launchApp();
+  const guestHome = await homeWindow(guestApp);
+  await guestHome.getByTestId('join-input').fill(link);
+  await guestHome.getByTestId('join-button').click();
+  await guestHome.waitForURL(new RegExp(`^https://localhost:${PORT}/r/`), { timeout: 45_000 });
+  await expect(guestHome.getByLabel('Your name')).toBeVisible({ timeout: 20_000 });
+  await guestHome.getByLabel('Your name').fill('Guest');
+  await guestHome.getByRole('button', { name: /join room/i }).click();
+
+  await expect(hostWin.getByTestId('participants-count')).toHaveText('2', { timeout: 30_000 });
+  await expect(guestHome.getByTestId('participants-count')).toHaveText('2', { timeout: 30_000 });
+
+  const hostId = await hostWin.evaluate(() => window.__app.selfId());
+  await expect
+    .poll(() => guestHome.evaluate(() => window.__app.connections()), { timeout: 30_000 })
+    .toEqual(['connected']);
+
+  // Everyone arrives muted, so the host has to open the mic on purpose.
+  expect(await hostWin.evaluate(() => window.__app.micMuted())).toBe(true);
+  await hostWin.getByTestId('mic-toggle').click();
+  await expect.poll(() => hostWin.evaluate(() => window.__app.micMuted())).toBe(false);
+
+  const inboundEnergy = () =>
+    guestHome.evaluate(async (id) => {
+      const stats = (await window.__app.stats(id)) ?? [];
+      // Two inbound audio streams exist per peer (mic and shared audio). The mic's is the one
+      // whose mid maps to the 'mic' role; failing that, the one carrying energy.
+      const mic = (window.__app.transceivers(id) ?? []).find((t) => t.role === 'mic')?.mid ?? null;
+      const inbound = stats.filter((s) => s.type === 'inbound-rtp' && s.kind === 'audio');
+      const chosen =
+        inbound.find((s) => mic !== null && String(s.mid) === String(mic)) ??
+        inbound.reduce((best, s) => ((s.totalAudioEnergy ?? 0) > (best?.totalAudioEnergy ?? -1) ? s : best), null);
+      return chosen?.totalAudioEnergy ?? 0;
+    }, hostId);
+
+  // Wait for the first non-zero sample, then insist the counter keeps climbing: a single
+  // non-zero reading could be a burst at unmute; a rising one is a tone being decoded.
+  await expect
+    .poll(inboundEnergy, { timeout: 30_000, message: 'the guest should decode some audio' })
+    .toBeGreaterThan(0);
+  const before = await inboundEnergy();
+  await guestHome.waitForTimeout(3_000);
+  const after = await inboundEnergy();
+  expect(after, 'inbound audio energy should rise over 3 s').toBeGreaterThan(before);
+
+  // The guest reports back what it hears, and the host's stats say so in plain words.
+  await hostWin.getByTestId('stats-toggle').click();
+  await expect(hostWin.getByTestId('stat-they-hear').first()).toHaveText(/can hear you/, {
+    timeout: 20_000,
+  });
+
+  await guestApp.close();
+  await hostApp.close();
+});

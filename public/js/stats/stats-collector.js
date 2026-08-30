@@ -5,6 +5,12 @@
  * The elapsed time comes from the report timestamps rather than the polling interval: a
  * busy main thread delays the timer, and dividing by the nominal interval then reports a
  * bitrate that is wrong in exactly the situation the user is trying to diagnose.
+ *
+ * Audio is measured as SOUND, not bytes. A muted microphone and a microphone that delivers
+ * digital silence both produce a steady ~14 kbps of Opus, so `bytesSent` cannot answer "is my
+ * voice leaving this machine". `media-source.totalAudioEnergy` (what the encoder was given)
+ * and `inbound-rtp.totalAudioEnergy` (what the decoder produced) can, and `deriveAudio` turns
+ * them into per-interval RMS levels on both ends of every audio stream.
  */
 
 import { ema } from '../core/util.js';
@@ -12,6 +18,150 @@ import { logger } from '../core/logger.js';
 
 /** Rates are noisy enough sample-to-sample that an unsmoothed readout cannot be read. */
 const SMOOTHING = 0.3;
+
+/** Above this per-interval RMS, an audio stream carries speech rather than room tone. Same
+ *  scale as the level meter (0..1 RMS); room tone with noise suppression sits at ~0.002. */
+export const MIC_SPEECH_RMS = 0.01;
+
+const finite = (value) => (Number.isFinite(value) ? value : null);
+
+/** Interval RMS from two cumulative energy/duration readings. Null when it cannot be known. */
+function intervalRms(energy, duration, prevEnergy, prevDuration) {
+  if (energy === null || duration === null || prevEnergy === null || prevDuration === null) return null;
+  const dE = Math.max(0, energy - prevEnergy);
+  const dD = duration - prevDuration;
+  if (!(dD > 0)) return null;
+  return Math.min(1, Math.sqrt(dE / dD));
+}
+
+/**
+ * Everything audio in one getStats report, as levels and rates.
+ *
+ * Pure: takes the report's values and the previous cumulative snapshot, returns the derived
+ * numbers plus a new snapshot for next time. `undefined` browser fields become `null` --
+ * "unknown", never "silent" -- because a Safari guest reports no audioLevel at all and must
+ * not be told its microphone is dead.
+ *
+ * @param {Iterable<object>} values     report.values()
+ * @param {{micTrackId?: string|null, roleByMid?: Record<string,string>, prev?: object|null, dtSec?: number|null}} opts
+ */
+export function deriveAudio(values, { micTrackId = null, roleByMid = {}, prev = null, dtSec = null } = {}) {
+  const mediaSources = new Map();
+  const outboundAudio = [];
+  const inboundAudio = [];
+  const remoteInboundAudio = [];
+
+  for (const stat of values) {
+    switch (stat.type) {
+      case 'media-source':
+        if (stat.kind === 'audio') mediaSources.set(stat.id, stat);
+        break;
+      case 'outbound-rtp':
+        if (stat.kind === 'audio') outboundAudio.push(stat);
+        break;
+      case 'inbound-rtp':
+        if (stat.kind === 'audio') inboundAudio.push(stat);
+        break;
+      case 'remote-inbound-rtp':
+        if (stat.kind === 'audio') remoteInboundAudio.push(stat);
+        break;
+      default:
+        break;
+    }
+  }
+
+  // Which outbound audio report is the microphone. The m-line's role is authoritative when the
+  // report carries a mid; the media-source's track id is the second witness; and the sole
+  // report is taken as the mic only when a mic track is actually attached -- with no mic track,
+  // a lone report is the shared system audio, and calling that "the microphone" would report a
+  // film's bitrate as speech.
+  const roleOf = (stat) => (stat.mid !== null && stat.mid !== undefined ? roleByMid[stat.mid] : undefined);
+  const micOutbound =
+    outboundAudio.find((stat) => roleOf(stat) === 'mic') ??
+    outboundAudio.find((stat) => {
+      const source = stat.mediaSourceId ? mediaSources.get(stat.mediaSourceId) : null;
+      return micTrackId && source?.trackIdentifier === micTrackId;
+    }) ??
+    (micTrackId && outboundAudio.length === 1 && (roleOf(outboundAudio[0]) ?? 'mic') === 'mic'
+      ? outboundAudio[0]
+      : null);
+  const micSource = micOutbound?.mediaSourceId ? (mediaSources.get(micOutbound.mediaSourceId) ?? null) : null;
+
+  const cumulative = {
+    micEnergy: finite(micSource?.totalAudioEnergy),
+    micDuration: finite(micSource?.totalSamplesDuration),
+    micPackets: finite(micOutbound?.packetsSent),
+    micBytes: micOutbound?.bytesSent ?? 0,
+    in: {},
+  };
+
+  const dt = Number.isFinite(dtSec) && dtSec > 0 ? dtSec : null;
+  const perSec = (now, before) => (dt !== null && now !== null && before !== null ? Math.max(0, now - before) / dt : null);
+
+  const micLevel = finite(micSource?.audioLevel);
+  const micRms = prev ? intervalRms(cumulative.micEnergy, cumulative.micDuration, prev.micEnergy, prev.micDuration) : null;
+  const mic = {
+    hasSender: Boolean(micOutbound),
+    level: micLevel,
+    rms: micRms,
+    energyPerSec: prev ? perSec(cumulative.micEnergy, prev.micEnergy) : null,
+    packetsPerSec: prev ? perSec(cumulative.micPackets, prev.micPackets) : null,
+    // Interval RMS is the honest measure; the instantaneous level is the fallback when a
+    // browser reports one but not the other. Null means "cannot tell", not "silent".
+    speech: micRms !== null ? micRms > MIC_SPEECH_RMS : micLevel !== null ? micLevel > MIC_SPEECH_RMS : null,
+  };
+
+  const audioIn = {};
+  let inboundAudioBytes = 0;
+  for (const stat of inboundAudio) {
+    inboundAudioBytes += stat.bytesReceived ?? 0;
+    const mid = stat.mid ?? null;
+    const mapped = mid !== null ? roleByMid[mid] : undefined;
+    const role = mapped ?? (inboundAudio.length === 1 ? 'mic' : `mid:${mid ?? '?'}`);
+    const snapshot = {
+      energy: finite(stat.totalAudioEnergy),
+      duration: finite(stat.totalSamplesDuration),
+      packets: finite(stat.packetsReceived),
+      concealed: finite(stat.concealedSamples),
+      bytes: stat.bytesReceived ?? 0,
+    };
+    cumulative.in[role] = snapshot;
+    const before = prev?.in?.[role] ?? null;
+    const rms = before ? intervalRms(snapshot.energy, snapshot.duration, before.energy, before.duration) : null;
+    const level = finite(stat.audioLevel);
+    audioIn[role] = {
+      mid,
+      bps: before && dt !== null ? (Math.max(0, snapshot.bytes - before.bytes) * 8) / dt : null,
+      level,
+      rms,
+      energyPerSec: before ? perSec(snapshot.energy, before.energy) : null,
+      packetsPerSec: before ? perSec(snapshot.packets, before.packets) : null,
+      concealedPerSec: before ? perSec(snapshot.concealed, before.concealed) : null,
+      jitterMs: Number.isFinite(stat.jitter) ? Math.round(stat.jitter * 1000) : null,
+      packetsLost: finite(stat.packetsLost),
+      speech: rms !== null ? rms > MIC_SPEECH_RMS : level !== null ? level > MIC_SPEECH_RMS : null,
+    };
+  }
+
+  const remote = remoteInboundAudio[0] ?? null;
+  const remoteAudioLoss = remote
+    ? {
+        packetsLost: finite(remote.packetsLost),
+        jitterMs: Number.isFinite(remote.jitter) ? Math.round(remote.jitter * 1000) : null,
+        roundTripMs: Number.isFinite(remote.roundTripTime) ? Math.round(remote.roundTripTime * 1000) : null,
+        fractionLost: finite(remote.fractionLost),
+      }
+    : null;
+
+  return {
+    mic,
+    audioIn,
+    remoteAudioLoss,
+    cumulative,
+    hasInboundAudio: inboundAudio.length > 0,
+    inboundAudioBytes,
+  };
+}
 
 export function createStatsCollector({ mesh, config, onSample }) {
   const intervalMs = config?.media?.statsPollIntervalMs ?? 1000;
@@ -58,8 +208,16 @@ export function createStatsCollector({ mesh, config, onSample }) {
           // so "the first audio report" is a coin flip between them. The sender the mesh
           // labels 'mic' knows its own track, and that id is what ties it to a report.
           const micTrackId = peer.sender?.('mic')?.track?.id ?? null;
-          const sample = derive(peer.peerId, report, micTrackId);
-          if (sample) results.push(sample);
+          // Inbound audio is told apart the same way, by the m-line it arrived on.
+          const roleByMid = {};
+          for (const entry of peer.taggedSenders?.() ?? []) {
+            if (entry.mid !== null && entry.mid !== undefined) roleByMid[entry.mid] = entry.role;
+          }
+          const sample = derive(peer.peerId, report, micTrackId, roleByMid);
+          if (sample) {
+            sample.transceivers = peer.transceiverSnapshot?.() ?? null;
+            results.push(sample);
+          }
         } catch (err) {
           logger.debug('stats: getStats failed', { peerId: peer.peerId, error: err?.message });
         }
@@ -74,37 +232,23 @@ export function createStatsCollector({ mesh, config, onSample }) {
    * Reduce one getStats report to the handful of numbers the UI and the quality controller
    * actually use.
    */
-  function derive(peerId, report, micTrackId = null) {
+  function derive(peerId, report, micTrackId = null, roleByMid = {}) {
     let outboundVideo = null;
     let inboundVideo = null;
-    /** Every inbound audio report summed: "is any voice arriving" is the useful question, and
-     *  a remote peer can be sending both a microphone and shared system audio. */
-    let inboundAudioBytes = 0;
-    let inboundAudioPresent = false;
-    /** Outbound audio, split by which of our two senders produced it. */
-    const outboundAudioReports = [];
-    const mediaSources = new Map();
     let candidatePair = null;
     let transport = null;
     let remoteInbound = null;
 
     const candidates = new Map();
+    const values = [...report.values()];
 
-    for (const stat of report.values()) {
+    for (const stat of values) {
       switch (stat.type) {
         case 'outbound-rtp':
           if (stat.kind === 'video') outboundVideo = stat;
-          else if (stat.kind === 'audio') outboundAudioReports.push(stat);
           break;
         case 'inbound-rtp':
           if (stat.kind === 'video') inboundVideo = stat;
-          else if (stat.kind === 'audio') {
-            inboundAudioBytes += stat.bytesReceived ?? 0;
-            inboundAudioPresent = true;
-          }
-          break;
-        case 'media-source':
-          mediaSources.set(stat.id, stat);
           break;
         case 'remote-inbound-rtp':
           if (stat.kind === 'video') remoteInbound = stat;
@@ -126,15 +270,6 @@ export function createStatsCollector({ mesh, config, onSample }) {
       }
     }
 
-    // An outbound-rtp points at a media-source, and the media-source carries the track id --
-    // which is how the microphone's report is told apart from the shared audio's. Falling back
-    // to the sole report when there is only one, since then there is nothing to confuse.
-    const micOutbound =
-      outboundAudioReports.find((stat) => {
-        const source = stat.mediaSourceId ? mediaSources.get(stat.mediaSourceId) : null;
-        return micTrackId && source?.trackIdentifier === micTrackId;
-      }) ?? (outboundAudioReports.length === 1 ? outboundAudioReports[0] : null);
-
     if (transport?.selectedCandidatePairId) {
       const selected = report.get(transport.selectedCandidatePairId);
       if (selected) candidatePair = selected;
@@ -149,24 +284,33 @@ export function createStatsCollector({ mesh, config, onSample }) {
     const now = outboundVideo?.timestamp ?? inboundVideo?.timestamp ?? transport?.timestamp ?? performance.now();
     const prev = previous.get(peerId);
 
+    // Seconds actually elapsed, from the clock rather than the nominal interval.
+    const dt = prev ? (now - prev.t) / 1000 : null;
+
+    const audio = deriveAudio(values, {
+      micTrackId,
+      roleByMid,
+      prev: prev?.audio ?? null,
+      dtSec: dt,
+    });
+
     const current = {
       t: now,
       bytesSent: outboundVideo?.bytesSent ?? 0,
       bytesReceived: inboundVideo?.bytesReceived ?? 0,
-      micBytesSent: micOutbound?.bytesSent ?? 0,
-      audioBytesReceived: inboundAudioBytes,
+      micBytesSent: audio.cumulative.micBytes,
+      audioBytesReceived: audio.inboundAudioBytes,
       framesEncoded: outboundVideo?.framesEncoded ?? 0,
       framesDecoded: inboundVideo?.framesDecoded ?? 0,
       framesDropped: inboundVideo?.framesDropped ?? 0,
       packetsLost: inboundVideo?.packetsLost ?? 0,
       packetsReceived: inboundVideo?.packetsReceived ?? 0,
+      audio: audio.cumulative,
     };
     previous.set(peerId, current);
 
     if (!prev) return null; // a rate needs two samples
 
-    // Seconds actually elapsed, from the clock rather than the nominal interval.
-    const dt = (current.t - prev.t) / 1000;
     // Reject a non-positive or implausible interval rather than publishing a rate derived
     // from it. This also covers the case where the timestamp source differs between two
     // samples because one report type was momentarily absent.
@@ -253,9 +397,20 @@ export function createStatsCollector({ mesh, config, onSample }) {
       // while a report sitting at zero means it is attached and sending silence. The first is a
       // bug, the second is usually just the mute button.
       micSendBps: next.micSendBps,
-      hasMicSender: Boolean(micOutbound),
+      hasMicSender: audio.mic.hasSender,
       audioRecvBps: next.audioRecvBps,
-      hasInboundAudio: inboundAudioPresent,
+      hasInboundAudio: audio.hasInboundAudio,
+
+      // And the third value, without which the second is ambiguous: whether the microphone
+      // the sender was given carried any SOUND. This is what separates "muted" and "silent
+      // device" from "speaking", which bytes never could.
+      micAudioLevel: audio.mic.level,
+      micRms: audio.mic.rms,
+      micEnergyPerSec: audio.mic.energyPerSec,
+      micPacketsPerSec: audio.mic.packetsPerSec,
+      micSpeech: audio.mic.speech,
+      audioIn: audio.audioIn,
+      remoteAudioLoss: audio.remoteAudioLoss,
     };
   }
 

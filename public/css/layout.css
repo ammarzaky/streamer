@@ -194,6 +194,10 @@
   max-width: 42ch;
 }
 
+.stage__empty-icon {
+  color: var(--text-3);
+}
+
 /* The shared screen. `contain` keeps the whole window visible: cropping someone's screen to
    fill the viewport hides exactly the toolbars and edges they are usually pointing at. */
 .stage__video {
@@ -278,6 +282,20 @@
 
 /* Secondary controls sit at the trailing edge so the primary media controls stay centred
    and land in the same place regardless of how many extras are present. */
+/* Positioning context for a popover (the quality menu) anchored to its button. */
+.controlbar__anchor {
+  position: relative;
+}
+
+/* Remote <audio> elements live here, outside the stage: present in the document so they play,
+   but taking no space. Classes rather than inline styles because the CSP is style-src 'self'. */
+.audio-sinks {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
 .controlbar__end {
   position: absolute;
   right: var(--space-4);

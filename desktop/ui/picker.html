@@ -26,7 +26,13 @@
       <p class="picker__empty muted" id="empty" hidden>Nothing to show here.</p>
 
       <footer class="picker__foot">
-        <span class="muted" id="audio-note"></span>
+        <div class="picker__audio">
+          <label class="picker__check" id="audio-option" hidden>
+            <input type="checkbox" id="system-audio" data-testid="picker-system-audio" checked />
+            <span>Share system audio</span>
+          </label>
+          <span class="muted" id="audio-note"></span>
+        </div>
         <div class="row">
           <button id="cancel" data-testid="picker-cancel">Cancel</button>
           <button class="primary" id="share" data-testid="picker-share" disabled>Share</button>

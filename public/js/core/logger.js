@@ -9,7 +9,7 @@
  */
 
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
-const BUFFER_SIZE = 500;
+const BUFFER_SIZE = 800;
 
 let threshold = LEVELS.info;
 const buffer = [];
@@ -72,9 +72,21 @@ export const logger = {
     record('error', message, serialized);
   },
 
-  /** The text behind the "Copy diagnostics" button. */
-  dump(extra = {}) {
-    return JSON.stringify({ generatedAt: new Date().toISOString(), ...extra, log: buffer }, null, 2);
+  /**
+   * The text behind the "Copy diagnostics" button.
+   *
+   * `compact` is for the copy that travels to a peer over the data channel, which has a hard
+   * size cap: no indentation and only the newest `logLimit` entries.
+   */
+  dump(extra = {}, { compact = false, logLimit = null } = {}) {
+    const log = Number.isInteger(logLimit) && logLimit >= 0 ? buffer.slice(-logLimit) : buffer;
+    const body = { generatedAt: new Date().toISOString(), ...extra, log };
+    return compact ? JSON.stringify(body) : JSON.stringify(body, null, 2);
+  },
+
+  /** The newest `limit` entries, for anything that wants to embed a slice of the buffer. */
+  entries(limit = buffer.length) {
+    return buffer.slice(-Math.max(0, limit));
   },
 
   clear() {

@@ -168,10 +168,22 @@
 
     "audio": {
       "_comment": [
-        "echoCancellation is off because the usual setup is headphones, and AEC mangles the",
-        "system audio of whatever is being shared. Turn it on if you use speakers."
+        "echoCancellation is ON. It was off originally, on the assumption that everyone wears",
+        "headphones -- and that assumption was simply wrong for the people using this. Two",
+        "laptops on speakers, with AEC off, means each side hears itself back through the",
+        "other side's microphone and there is nothing anywhere to suppress it.",
+        "",
+        "What AEC does NOT do, because it was once changed in the belief that it would: it",
+        "processes only the signal you SEND. It cannot stop you hearing your own voice locally",
+        "(that is Windows 'Listen to this device' or a headset's sidetone -- see",
+        "docs/TROUBLESHOOTING.md), and it does nothing for a microphone that delivers silence.",
+        "",
+        "The cost is real: AEC processes the shared system audio too, so music and video you",
+        "share lose some fidelity. That is a worse trade than an unusable call. Set it to false",
+        "if everyone is on headphones and you are sharing media where the difference matters.",
+        "It can also be toggled per session from the microphone menu in the room."
       ],
-      "echoCancellation": false,
+      "echoCancellation": true,
       "noiseSuppression": true,
       "autoGainControl": true,
       "channelCount": 1,

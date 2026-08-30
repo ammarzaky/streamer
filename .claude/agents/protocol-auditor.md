@@ -28,6 +28,11 @@ Then verify:
   A hardcoded `'ice-candidate'` that drifts from the constant is exactly the bug this
   audit exists to catch.
 
+> **Not signaling:** the `diag` and `diag-dump` `RTCDataChannel`s (`public/js/rtc/diag-channel.js`)
+> carry audio diagnostics peer-to-peer and never touch the server or `protocol.js`. Their
+> traffic is not a message type and must not be flagged as an undocumented message. Do check
+> that nothing on them is treated as trusted (they are parsed as untrusted input).
+
 **2. Payload shapes match.** For each message, compare the fields the sender writes against
 the fields the receiver reads and the server validator enforces. Report any field that is
 sent but never read, read but never sent, or validated with a different type than it is sent

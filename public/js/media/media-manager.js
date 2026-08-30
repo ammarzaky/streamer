@@ -11,6 +11,12 @@
  * 2. **`getDisplayMedia` is called synchronously from the click handler.** It requires
  *    transient user activation, so it cannot be awaited behind a server round trip -- see
  *    `captureDisplay` below.
+ *
+ * A third rule arrived with the third "nobody can hear me" report: **the microphone is never
+ * acquired silently.** Which device the browser opened, what it reports about it, and every
+ * later change to it (source muted, ended, devices plugged in) is logged and surfaced, because a
+ * track that is `live`, `enabled` and delivering digital silence looks exactly like a working
+ * one from every other angle.
  */
 
 import { ERRORS } from '../../shared/protocol.js';
@@ -18,12 +24,21 @@ import { micError, shareError, AppError } from '../core/errors.js';
 import { logger } from '../core/logger.js';
 import { isE2E } from '../core/env.js';
 import { makeSyntheticDisplayStream } from './synthetic-stream.js';
+import {
+  micConstraints,
+  pickSettings,
+  describeDevices,
+  sameProcessing,
+  PROCESSING_KEYS,
+} from './mic-constraints.js';
 
 export function createMediaManager({
   config,
   onShareEnded,
   onDisplayAudioEnded,
   onDisplaySettingsChanged,
+  onMicTrackState,
+  onDevicesChanged,
 }) {
   /** @type {MediaStream|null} */
   let micStream = null;
@@ -40,18 +55,145 @@ export function createMediaManager({
    *  of them can fire together. */
   let stoppingShare = false;
 
+  /** The device the user asked for; null means "whatever the browser calls default". Kept in
+   *  memory only -- this app stores nothing but the host token. */
+  let currentDeviceId = null;
+  /** Processing flags changed at runtime (AEC/NS/AGC). Layered over the server config. */
+  const processingOverrides = {};
+  /** The last enumerateDevices() result, described. */
+  let devices = null;
+  let acquiredAt = null;
+  /** Set by stopAll(): the session is over and nothing may re-open the microphone. */
+  let stopped = false;
+
+  /**
+   * Every acquisition goes through one chain. Two overlapping getUserMedia calls -- a device
+   * switch during a processing switch, an unmute during a restart -- would otherwise both
+   * adopt, both replace the senders' track in whatever order they resolved, and leave one
+   * capture open for the life of the page with the mute button acting on the other.
+   */
+  let micChain = Promise.resolve();
+  const serial = (fn) => {
+    const run = micChain.then(fn, fn);
+    micChain = run.catch(() => {});
+    return run;
+  };
+
   // -------------------------------------------------------------------------
   // Microphone
   // -------------------------------------------------------------------------
 
+  /** The audio config in force: server config, then anything toggled this session. */
+  function effectiveAudio() {
+    return { ...(config?.media?.audio ?? {}), ...processingOverrides };
+  }
+
+  /**
+   * Everything worth knowing about the microphone track, for the log, the UI and the dump.
+   * `label` is the one field a person can act on: it names the device Windows actually opened.
+   */
+  function micInfo() {
+    const track = micStream?.getAudioTracks()[0] ?? null;
+    if (!track) return null;
+    let settings = {};
+    try {
+      settings = track.getSettings?.() ?? {};
+    } catch {
+      // Some browsers throw on an ended track.
+    }
+    return {
+      id: track.id,
+      label: track.label,
+      readyState: track.readyState,
+      muted: track.muted,
+      enabled: track.enabled,
+      requestedDeviceId: currentDeviceId,
+      settings: pickSettings(settings),
+      acquiredAt,
+    };
+  }
+
+  /**
+   * Watch the source, not just the track. `mute` here is the BROWSER saying the capture endpoint
+   * is muted in Windows: Chromium polls the endpoint's mute state once a second and mirrors it
+   * onto the track (measured: the event lands within about a second of the keyboard's mic-mute
+   * key, and `unmute` follows the moment it is released). It is unrelated to the mute button,
+   * and without a listener it is a silent microphone that the roster shows as live.
+   */
+  function watchMicTrack(track) {
+    track.addEventListener('mute', () => {
+      logger.warn('audio: mic track mute (endpoint muted in Windows)', { label: track.label });
+      onMicTrackState?.({ event: 'mute', sourceMuted: true, info: micInfo() });
+    });
+    track.addEventListener('unmute', () => {
+      logger.info('audio: mic track unmute', { label: track.label });
+      onMicTrackState?.({ event: 'unmute', sourceMuted: false, info: micInfo() });
+    });
+    track.addEventListener(
+      'ended',
+      () => {
+        logger.warn('audio: mic track ended', { label: track.label });
+        // An ended track is not a microphone. Dropping the stream here is what makes the next
+        // unmute re-acquire instead of flipping the button over a dead sender.
+        if (micStream?.getAudioTracks()[0] === track) micStream = null;
+        onMicTrackState?.({ event: 'ended', ended: true, info: null, label: track.label });
+      },
+      { once: true },
+    );
+  }
+
+  function adopt(stream, source) {
+    micStream = stream;
+    acquiredAt = Date.now();
+    const track = stream.getAudioTracks()[0] ?? null;
+    if (!track) {
+      logger.warn('audio: stream has no audio track', { source });
+      return null;
+    }
+    track.enabled = !micMuted;
+    watchMicTrack(track);
+    logger.info('audio: mic acquired', { source, ...micInfo() });
+    void refreshDevices('acquired');
+    return track;
+  }
+
+  async function acquire(deviceId) {
+    const constraints = micConstraints(effectiveAudio(), { deviceId });
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: constraints, video: false });
+    } catch (err) {
+      // The chosen device went away (unplugged between picking and opening). Fall back to the
+      // default rather than leaving the user with no microphone at all -- and say so.
+      if (deviceId && (err?.name === 'OverconstrainedError' || err?.name === 'NotFoundError')) {
+        logger.warn('audio: requested device unavailable, falling back to default', {
+          deviceId,
+          name: err?.name,
+        });
+        currentDeviceId = null;
+        return navigator.mediaDevices.getUserMedia({
+          audio: micConstraints(effectiveAudio(), {}),
+          video: false,
+        });
+      }
+      throw err;
+    }
+  }
+
   /**
    * Acquire the microphone.
    *
-   * `echoCancellation` defaults to off: the usual setup here is headphones, and AEC treats
-   * the system audio of a shared video as echo and mangles it. It is exposed in config for
-   * anyone using speakers.
+   * `stream` is the lobby's already-verified stream: when its device and processing match what
+   * the room wants, it is adopted rather than re-acquired, so the track the meter moved for on
+   * the join screen is the exact track peers receive. Otherwise it is released and a fresh
+   * request is made -- with the reason logged, because "the lobby worked and the room did not"
+   * used to be undiagnosable.
    */
-  function startMic() {
+  function startMic({ stream = null, deviceId } = {}) {
+    if (stopped) {
+      stream?.getTracks?.().forEach((track) => track.stop());
+      return Promise.resolve(null);
+    }
+    if (deviceId !== undefined) currentDeviceId = deviceId;
     if (micStream) return Promise.resolve(micStream.getAudioTracks()[0] ?? null);
 
     // The in-flight promise is memoized rather than guarded by a boolean. getUserMedia is
@@ -61,26 +203,35 @@ export function createMediaManager({
     // both ask for the microphone, so this is reachable, not theoretical.
     if (micRequest) return micRequest;
 
-    const audio = config?.media?.audio ?? {};
-    micRequest = navigator.mediaDevices
-      .getUserMedia({
-        audio: {
-          echoCancellation: audio.echoCancellation ?? false,
-          noiseSuppression: audio.noiseSuppression ?? true,
-          autoGainControl: audio.autoGainControl ?? true,
-          channelCount: audio.channelCount ?? 1,
-        },
-        video: false,
-      })
-      .then((stream) => {
-        micStream = stream;
-        const track = stream.getAudioTracks()[0] ?? null;
-        if (track) track.enabled = !micMuted;
-        logger.info('media: microphone started');
-        return track;
-      })
+    const handed = stream?.getAudioTracks?.()[0] ?? null;
+    if (handed && handed.readyState === 'live') {
+      const wanted = micConstraints(effectiveAudio(), {});
+      let settings = {};
+      try {
+        settings = handed.getSettings?.() ?? {};
+      } catch {
+        // Treated as unknown below.
+      }
+      const deviceOk = !currentDeviceId || settings.deviceId === currentDeviceId;
+      if (deviceOk && sameProcessing(settings, wanted)) {
+        return Promise.resolve(adopt(stream, 'lobby-handoff'));
+      }
+      logger.info('audio: lobby stream not adopted, re-acquiring', {
+        deviceOk,
+        lobby: pickSettings(settings),
+        wanted: Object.fromEntries(PROCESSING_KEYS.map((k) => [k, wanted[k]])),
+      });
+      stream.getTracks().forEach((track) => track.stop());
+    }
+
+    micRequest = serial(() => (micStream ? micStream : acquire(currentDeviceId)))
+      .then((acquired) => (acquired === micStream ? micStream.getAudioTracks()[0] ?? null : adopt(acquired, 'getUserMedia')))
       .catch((err) => {
-        logger.warn('media: getUserMedia failed', { name: err?.name });
+        logger.warn('media: getUserMedia failed', {
+          name: err?.name,
+          message: err?.message,
+          deviceId: currentDeviceId,
+        });
         throw micError(err);
       })
       .finally(() => {
@@ -88,6 +239,79 @@ export function createMediaManager({
       });
 
     return micRequest;
+  }
+
+  /**
+   * Switch device or processing.
+   *
+   * For a DEVICE change the new track is acquired first and handed to the caller, who puts it
+   * on every sender with `replaceTrack` (no renegotiation) and only then calls `finish()` to
+   * stop the old one, so the senders never hold an ended track while a prompt is open.
+   *
+   * A PROCESSING change (AEC/NS/AGC) cannot overlap. Measured on Chromium 130 and 141: a second
+   * capture of a device that is already open is handed the FIRST capture's processing settings
+   * regardless of what it asked for, and `applyConstraints()` on the live track resolves
+   * without changing them. The only request that is honoured is one made after the device has
+   * been released, so the old track is stopped first and the sent audio has a brief gap. If
+   * the re-acquisition then fails, the previous settings are restored and tried again rather
+   * than leaving the user with no microphone over a checkbox.
+   */
+  function restartMic(opts = {}) {
+    if (stopped) return Promise.reject(micError(new Error('media stopped')));
+    return serial(() => restartMicNow(opts));
+  }
+
+  async function restartMicNow({ deviceId, processing } = {}) {
+    if (deviceId !== undefined) currentDeviceId = deviceId;
+    const previous = { ...processingOverrides };
+    const before = effectiveAudio();
+    let changesProcessing = false;
+    if (processing) {
+      for (const key of PROCESSING_KEYS) {
+        if (typeof processing[key] !== 'boolean') continue;
+        if (processing[key] !== Boolean(before[key])) changesProcessing = true;
+        processingOverrides[key] = processing[key];
+      }
+    }
+
+    const old = micStream;
+    if (changesProcessing && old) {
+      old.getTracks().forEach((t) => t.stop());
+      micStream = null;
+      logger.info('audio: mic released for processing change', {
+        requested: Object.fromEntries(PROCESSING_KEYS.map((k) => [k, effectiveAudio()[k]])),
+      });
+    }
+
+    let fresh;
+    try {
+      fresh = await acquire(currentDeviceId);
+    } catch (err) {
+      logger.warn('audio: mic restart failed', { name: err?.name, message: err?.message });
+      if (!changesProcessing) throw micError(err);
+      for (const key of PROCESSING_KEYS) {
+        if (key in previous) processingOverrides[key] = previous[key];
+        else delete processingOverrides[key];
+      }
+      try {
+        fresh = await acquire(currentDeviceId);
+        logger.warn('audio: processing change reverted after a failed re-acquisition');
+      } catch (err2) {
+        throw micError(err2);
+      }
+    }
+
+    const track = adopt(fresh, 'restart');
+    return {
+      track,
+      finish() {
+        // Defensive on purpose: stop everything that is not the CURRENT stream's track, which
+        // covers the old one and, should a later switch have superseded this one, this one.
+        const current = micStream?.getAudioTracks()[0] ?? null;
+        for (const t of old?.getTracks() ?? []) if (t !== current) t.stop();
+        if (micStream !== fresh) fresh.getTracks().forEach((t) => t.stop());
+      },
+    };
   }
 
   /**
@@ -111,9 +335,50 @@ export function createMediaManager({
   }
 
   function stopMic() {
+    const had = micStream?.getAudioTracks()[0]?.label ?? null;
     micStream?.getTracks().forEach((track) => track.stop());
     micStream = null;
+    if (had !== null) logger.info('audio: mic released', { label: had });
   }
+
+  // -------------------------------------------------------------------------
+  // Devices
+  // -------------------------------------------------------------------------
+
+  /**
+   * What the browser can see. Labels are only populated once a capture has been granted, which
+   * is why this runs after every acquisition rather than at boot.
+   *
+   * The one fact worth logging on Windows is whether "default" and "communications" resolve to
+   * the same physical device: when they do not, the headset the user speaks into is not the
+   * device the browser opened.
+   */
+  async function refreshDevices(reason) {
+    if (!navigator.mediaDevices?.enumerateDevices) return null;
+    try {
+      const list = await navigator.mediaDevices.enumerateDevices();
+      devices = describeDevices(list);
+      logger.info('audio: devices', {
+        reason,
+        inputs: devices.inputs.map((d) => d.label || '(no label)'),
+        outputs: devices.outputs.map((d) => d.label || '(no label)'),
+        defaultGroup: devices.defaultGroup,
+        communicationsGroup: devices.communicationsGroup,
+        defaultMatchesCommunications: devices.defaultMatchesCommunications,
+        current: micInfo()?.label ?? null,
+      });
+      onDevicesChanged?.(devices);
+      return devices;
+    } catch (err) {
+      logger.warn('audio: enumerateDevices failed', { name: err?.name });
+      return null;
+    }
+  }
+
+  navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+    logger.info('audio: devicechange');
+    void refreshDevices('devicechange');
+  });
 
   // -------------------------------------------------------------------------
   // Screen capture
@@ -144,6 +409,16 @@ export function createMediaManager({
       return Promise.reject(new AppError(ERRORS.SHARE_UNSUPPORTED));
     }
 
+    const wantAudio = config?.media?.includeDisplayAudio !== false;
+    // Chromium 141+ can keep the capturing page's own playback out of a tab/system capture,
+    // which is the browser-side cure for "everyone hears their own voice echoed back when I
+    // share". It is a no-op where unsupported, and it does NOT apply to the desktop app's
+    // Windows loopback path, which bypasses constraints entirely -- see desktop/capture.js.
+    const supportsRestrictOwnAudio = Boolean(
+      navigator.mediaDevices.getSupportedConstraints?.()?.restrictOwnAudio,
+    );
+    const audio = wantAudio ? (supportsRestrictOwnAudio ? { restrictOwnAudio: true } : true) : false;
+
     return navigator.mediaDevices
       .getDisplayMedia({
         video: {
@@ -153,7 +428,7 @@ export function createMediaManager({
         },
         // System/tab audio, if the user opts in at the picker. A second track, never mixed
         // into the microphone.
-        audio: config?.media?.includeDisplayAudio !== false,
+        audio,
         // Lets Chrome offer "share this tab instead" without ending the stream.
         surfaceSwitching: 'include',
         selfBrowserSurface: 'exclude',
@@ -173,14 +448,27 @@ export function createMediaManager({
     sharing = true;
     stoppingShare = false;
     watchDisplayTracks(stream);
+    const audioTrack = stream.getAudioTracks()[0] ?? null;
     logger.info('media: sharing started', {
       video: stream.getVideoTracks().length,
       audio: stream.getAudioTracks().length,
+      // Which audio the share carries matters for echo: a Windows system-mix capture includes
+      // the voices of everyone in the call, played back to them with a delay.
+      audioLabel: audioTrack?.label ?? null,
+      audioSettings: audioTrack ? pickSettings(safeSettings(audioTrack)) : null,
     });
     return {
       video: stream.getVideoTracks()[0] ?? null,
-      audio: stream.getAudioTracks()[0] ?? null,
+      audio: audioTrack,
     };
+  }
+
+  function safeSettings(track) {
+    try {
+      return track.getSettings?.() ?? {};
+    } catch {
+      return {};
+    }
   }
 
   /**
@@ -255,12 +543,14 @@ export function createMediaManager({
   }
 
   function stopAll() {
+    stopped = true;
     stopShare('teardown');
     stopMic();
   }
 
   return {
     startMic,
+    restartMic,
     stopMic,
     setMicMuted,
     captureDisplay,
@@ -268,9 +558,21 @@ export function createMediaManager({
     stopShare,
     displaySettings,
     stopAll,
+    micInfo,
+    refreshDevices,
+    effectiveAudio,
 
+    /** The live microphone track, or null. An ended track is reported as absent on purpose:
+     *  the unmute path re-acquires when this is null, and a dead track must not stop it. */
     get micTrack() {
-      return micStream?.getAudioTracks()[0] ?? null;
+      const track = micStream?.getAudioTracks()[0] ?? null;
+      return track && track.readyState !== 'ended' ? track : null;
+    },
+    get micDeviceId() {
+      return currentDeviceId;
+    },
+    get devices() {
+      return devices;
     },
     get displayVideoTrack() {
       return displayStream?.getVideoTracks()[0] ?? null;

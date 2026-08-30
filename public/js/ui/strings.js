@@ -15,6 +15,11 @@
 
 import { ERRORS } from '../../shared/protocol.js';
 
+// The audio diagnostics copy is bilingual (Arabic + English) and lives in its own table so
+// this file stays the single English UI source; it is re-exported here so tests can walk one
+// module for completeness.
+export * from './audio-strings.js';
+
 export const UI = {
   appName: 'Streamer',
   tagline: 'Private screen sharing for a small group.',
@@ -65,6 +70,10 @@ export const UI = {
   micCheckHearing: 'Microphone is working.',
   micCheckQuiet: 'Microphone is on. Say something to see the bar move.',
   micCheckFailed: 'No microphone. You can still watch and share your screen.',
+  micSystemDefault: 'System default',
+  micCommunications: 'Default communications device',
+  micOptions: 'Microphone options',
+  chooseMicrophone: 'Choose microphone',
 
   mute: 'Mute',
   unmute: 'Unmute',
@@ -119,6 +128,13 @@ export const UI = {
   statsMicNotSent: 'not being sent',
   /** Muting keeps the RTP session up and sends silence, so the bitrate stays non-zero. */
   statsMicMuted: 'muted, sending silence',
+  statsTheirMic: 'Their mic',
+  statsTheirShare: 'Their shared audio',
+  statsPlayback: 'Playback',
+  statsDirections: 'Directions',
+  statsTheyHearYou: 'They hear you',
+  statsAudioCheck: 'Audio check',
+  statsRequestPeerDiagnostics: 'Request their diagnostics',
   statsReceiving: 'Receiving',
   statsFrames: 'Frames',
   statsDropped: 'Dropped',
@@ -172,8 +188,11 @@ export const ERROR_COPY = {
     hint: 'Connect one and reload, or continue without audio — you can still see and share screens.',
   },
   [ERRORS.MIC_IN_USE]: {
-    message: 'Your microphone is being used by another app.',
-    hint: 'Close the other app (a call or recorder, usually) and try again.',
+    message: 'The microphone could not be opened.',
+    hint:
+      'Close any other app using it (a call or recorder, usually). On Windows also check Settings › Privacy & security › Microphone › ' +
+      "'Let desktop apps access your microphone', and Settings › System › Sound › Volume mixer › this app › Input device. " +
+      'Then pick your microphone from the list.',
   },
   [ERRORS.MIC_FAILED]: {
     message: "Couldn't start the microphone.",

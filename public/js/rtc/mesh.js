@@ -13,7 +13,7 @@ import { C2S, S2C } from '../../shared/protocol.js';
 import { createPeer } from './peer.js';
 import { logger } from '../core/logger.js';
 
-export function createMesh({ send, config, onTrack, onPeerState, onPeerFailed, onNegotiated }) {
+export function createMesh({ send, config, onTrack, onPeerState, onPeerFailed, onNegotiated, onDiagMessage }) {
   /** peerId -> Peer */
   const peers = new Map();
 
@@ -54,6 +54,7 @@ export function createMesh({ send, config, onTrack, onPeerState, onPeerFailed, o
       onStateChange: onPeerState,
       onFailed: (err) => onPeerFailed?.(id, err),
       onNegotiated,
+      onDiagMessage,
     });
 
     peers.set(id, peer);
@@ -154,6 +155,17 @@ export function createMesh({ send, config, onTrack, onPeerState, onPeerFailed, o
     peer: (id) => peers.get(id) ?? null,
     peerIds: () => [...peers.keys()],
     list: () => [...peers.values()],
+
+    /** Diagnostics report to one peer, over its data channel. False if it is not open yet. */
+    sendDiagTo(id, text) {
+      return peers.get(id)?.sendDiag(text) ?? false;
+    },
+    sendDumpTo(id, frames) {
+      return peers.get(id)?.sendDump(frames) ?? false;
+    },
+    transceivers(id) {
+      return peers.get(id)?.transceiverSnapshot() ?? null;
+    },
     get size() {
       return peers.size;
     },
@@ -185,6 +197,7 @@ export function createMesh({ send, config, onTrack, onPeerState, onPeerFailed, o
         polite: peer.polite,
         youInitiate: peer.youInitiate,
         connectionState: peer.connectionState,
+        diag: peer.diagState(),
       }));
     },
   };

@@ -4,12 +4,22 @@
  * Views are pure renderers over store state and emit intents; they never call the RTC or
  * media layers. That separation is what keeps mute logic in one place instead of spread
  * across three views that slowly disagree.
+ *
+ * The one thing this view OWNS rather than renders is the set of remote <audio> elements,
+ * because they are DOM. Their state (playing, blocked, muted) is exposed read-only through
+ * `audioSinkState` so the composition root can put it in the diagnostics and the stats panel.
  */
 
 import { h, need, replace, show, text, cls, icon } from '../core/dom.js';
-import { UI, errorCopy } from './strings.js';
+import { UI, errorCopy, TILE, MIC_MENU, STATS_AUDIO, SELFTEST, resolve } from './strings.js';
+import { biNode } from './dialog.js';
 import { fmtBitrate, fmtDuration, hueFromId, initials } from '../core/util.js';
 import { PRESETS } from '../../shared/quality-math.js';
+import { logger } from '../core/logger.js';
+import { RESERVED_DEVICE_IDS, friendlyDeviceLabel } from '../media/mic-constraints.js';
+
+/** A peer report older than this no longer describes the present. */
+const REPORT_STALE_MS = 8000;
 
 export function createRoomView({ store, bus, EVENTS }) {
   const el = {
@@ -41,6 +51,7 @@ export function createRoomView({ store, bus, EVENTS }) {
 
     lobbyMeter: need('#lobby-meter-fill'),
     lobbyMicStatus: need('#lobby-mic-status'),
+    lobbyMicDevice: need('#lobby-mic-device'),
 
     fullscreenToggle: need('#fullscreen-toggle'),
     fullscreenLabel: need('#fullscreen-label'),
@@ -51,9 +62,14 @@ export function createRoomView({ store, bus, EVENTS }) {
     overlayMeter: need('#overlay-meter-fill'),
     overlayExit: need('#overlay-exit'),
 
+    micGroup: need('#mic-group'),
     micToggle: need('#mic-toggle'),
     micIcon: need('#mic-icon'),
     micLabel: need('#mic-label'),
+    ctlMeter: need('#ctl-meter-fill'),
+    micMenuToggle: need('#mic-menu-toggle'),
+    micMenu: need('#mic-menu'),
+    micHint: need('#mic-hint'),
     shareToggle: need('#share-toggle'),
     shareIcon: need('#share-icon'),
     shareLabel: need('#share-label'),
@@ -71,8 +87,15 @@ export function createRoomView({ store, bus, EVENTS }) {
   /** peerId -> HTMLAudioElement. Remote audio is played through dedicated elements rather
    *  than the stage <video>, so muting a tile can never mute a person. */
   const audioElements = new Map();
+  /** peerId -> the last play() outcome and element events, for diagnostics. */
+  const sinkFacts = new Map();
 
   let sessionTimer = null;
+  /** The last level painted, so a mute flip can repaint the colour without a new sample. */
+  let lastLevel = 0;
+  let lastDead = false;
+  /** "Mute incoming audio (test)": applied to every element, present and future. */
+  let incomingMuted = false;
 
   // ---------------------------------------------------------------------------
   // Lobby
@@ -98,6 +121,11 @@ export function createRoomView({ store, bus, EVENTS }) {
     el.name.removeAttribute('aria-invalid');
   });
 
+  el.lobbyMicDevice.addEventListener('change', () => {
+    const deviceId = el.lobbyMicDevice.value || null;
+    bus.emit(EVENTS.INTENT_SET_MIC_DEVICE, { deviceId, lobby: true });
+  });
+
   function setLobbyMode({ creating }) {
     text(el.lobbyTitle, creating ? UI.lobbyCreateTitle : UI.lobbyTitle);
     text(el.lobbySubmit, creating ? UI.createNow : UI.joinNow);
@@ -115,6 +143,40 @@ export function createRoomView({ store, bus, EVENTS }) {
     replace(el.lobbyBanner, [
       h('span', { class: 'banner__text' }, [`${message} ${hint}`.trim(), detail ? ` (${detail})` : ''].join('')),
     ]);
+  }
+
+  /**
+   * Usable input devices with their display labels. Entries with no id (Firefox before full
+   * permission) and duplicates are dropped, so neither list can offer a button that re-opens
+   * the default for nothing.
+   */
+  function deviceOptions(devices) {
+    const seen = new Set();
+    const out = [];
+    for (const entry of devices?.inputs ?? []) {
+      if (!entry.deviceId || seen.has(entry.deviceId)) continue;
+      seen.add(entry.deviceId);
+      let label = friendlyDeviceLabel(entry) || entry.deviceId.slice(0, 8);
+      if (entry.deviceId === RESERVED_DEVICE_IDS.DEFAULT) label = `${UI.micSystemDefault} — ${label}`;
+      if (entry.deviceId === RESERVED_DEVICE_IDS.COMMUNICATIONS) label = `${UI.micCommunications} — ${label}`;
+      out.push({ deviceId: entry.deviceId, label });
+    }
+    return out;
+  }
+
+  /** Fill a <select> with the input devices, reserved entries first. */
+  function fillDeviceSelect(select, devices, currentDeviceId) {
+    const options = deviceOptions(devices);
+    replace(
+      select,
+      options.map((o) => h('option', { value: o.deviceId, selected: o.deviceId === (currentDeviceId ?? RESERVED_DEVICE_IDS.DEFAULT) }, o.label)),
+    );
+    if (currentDeviceId && options.some((o) => o.deviceId === currentDeviceId)) select.value = currentDeviceId;
+    show(select, options.length > 0);
+  }
+
+  function setLobbyDevices(devices, currentDeviceId) {
+    fillDeviceSelect(el.lobbyMicDevice, devices, currentDeviceId);
   }
 
   function enterRoom() {
@@ -137,6 +199,7 @@ export function createRoomView({ store, bus, EVENTS }) {
   // ---------------------------------------------------------------------------
 
   el.micToggle.addEventListener('click', () => bus.emit(EVENTS.INTENT_TOGGLE_MIC));
+  el.micMenuToggle.addEventListener('click', () => bus.emit(EVENTS.INTENT_TOGGLE_MIC_MENU));
   el.leave.addEventListener('click', () => bus.emit(EVENTS.INTENT_LEAVE));
   el.endSession.addEventListener('click', () => bus.emit(EVENTS.INTENT_END_SESSION));
   el.statsToggle.addEventListener('click', () => bus.emit(EVENTS.INTENT_TOGGLE_STATS));
@@ -167,9 +230,16 @@ export function createRoomView({ store, bus, EVENTS }) {
   });
 
   document.addEventListener('click', (event) => {
-    if (!store.state.ui.qualityMenuOpen) return;
-    if (el.qualityMenu.contains(event.target) || el.qualityToggle.contains(event.target)) return;
-    store.setUI({ qualityMenuOpen: false });
+    if (store.state.ui.qualityMenuOpen) {
+      if (!el.qualityMenu.contains(event.target) && !el.qualityToggle.contains(event.target)) {
+        store.setUI({ qualityMenuOpen: false });
+      }
+    }
+    if (store.state.ui.micMenuOpen) {
+      if (!el.micMenu.contains(event.target) && !el.micMenuToggle.contains(event.target)) {
+        store.setUI({ micMenuOpen: false });
+      }
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -186,12 +256,17 @@ export function createRoomView({ store, bus, EVENTS }) {
     cls(el.micToggle, 'ctl--active', !muted);
     el.micToggle.setAttribute('aria-pressed', String(muted));
     el.micToggle.dataset.micMuted = String(muted);
+    // The device Windows actually opened, where a hover can read it.
+    el.micToggle.title = self.micDevice?.label ? `${UI.micLabel}: ${self.micDevice.label}` : UI.micLabel;
 
     // The overlay duplicates this control for fullscreen, where the real bar is off-screen.
     el.overlayMicIcon.setAttribute('href', `/assets/icons.svg#${muted ? 'mic-off' : 'mic'}`);
     text(el.overlayMicLabel, muted ? UI.unmute : UI.mute);
     cls(el.overlayMic, 'ctl--off', muted);
     el.overlayMic.dataset.micMuted = String(muted);
+
+    // Amber/green must flip the instant the button does, not on the next meter sample.
+    setStageMicLevel(lastLevel, { dead: lastDead });
 
     // Only the host may end the session for everyone.
     show(el.endSession, self.isHost);
@@ -235,9 +310,30 @@ export function createRoomView({ store, bus, EVENTS }) {
     }
   }
 
+  /**
+   * What a peer's last report says about us, as one tile line.
+   *
+   * The report is the peer's own measurement of what it receives from us and whether its
+   * audio element is playing -- the two facts that used to be available only by asking.
+   */
+  function hearLine(peer) {
+    const { self } = store.state;
+    const report = peer.hearsMe;
+    if (!report || !Number.isFinite(report.at) || Date.now() - report.at > REPORT_STALE_MS) return null;
+    if (report.mutedForTest) return { pair: TILE.mutedForTest, tone: 'warn' };
+    if (self.micMuted) return null;
+    if (Number.isFinite(report.level) && report.level >= 0.01) {
+      return { pair: resolve(TILE.hearsYou, { level: report.level }), tone: 'ok' };
+    }
+    if (report.playing === false) return { pair: TILE.notPlaying, tone: 'bad' };
+    // Only claim silence while we are actually speaking; a quiet moment is not a fault.
+    if (lastLevel > 0.06 && Number.isFinite(report.level)) return { pair: TILE.cannotHearYou, tone: 'bad' };
+    return null;
+  }
+
   function renderRoster() {
     const peers = store.peerList();
-    const { self, share } = store.state;
+    const { self, share, audio } = store.state;
 
     const selfTile = tile({
       id: self.id ?? 'self',
@@ -247,6 +343,10 @@ export function createRoomView({ store, bus, EVENTS }) {
       isHost: self.isHost,
       isSharing: share.sharerId !== null && share.sharerId === self.id,
       pcState: 'connected',
+      hear: audio.health?.code === 'CAPTURE_SILENT' || audio.health?.code === 'UNHEARD_TRANSPORT'
+        ? { pair: TILE.nobodyHears, tone: 'bad' }
+        : null,
+      deviceLabel: self.micDevice?.label ?? null,
     });
 
     const peerTiles = peers.map((peer) =>
@@ -258,14 +358,17 @@ export function createRoomView({ store, bus, EVENTS }) {
         isHost: store.state.room.hostPeerId === peer.id,
         isSharing: share.sharerId === peer.id,
         pcState: peer.pcState,
+        hear: hearLine(peer),
       }),
     );
 
     replace(el.rosterList, [selfTile, ...peerTiles]);
     text(el.participantCount, String(store.participantCount()));
+    // The self tile was just rebuilt; give its bar the current level immediately.
+    setStageMicLevel(lastLevel, { dead: lastDead });
   }
 
-  function tile({ id, name, micMuted, isSelf, isHost, isSharing, pcState }) {
+  function tile({ id, name, micMuted, isSelf, isHost, isSharing, pcState, hear, deviceLabel }) {
     return h(
       'div',
       {
@@ -286,10 +389,22 @@ export function createRoomView({ store, bus, EVENTS }) {
           h('span', { class: 'tile__name' }, `${name}${isSelf ? ` (${UI.you})` : ''}`),
           h(
             'span',
-            { class: 'tile__status' },
+            { class: 'tile__status', title: deviceLabel ?? undefined },
             [isHost ? UI.host : null, isSharing ? 'sharing' : null].filter(Boolean).join(' · ') ||
               statusText(pcState),
           ),
+          isSelf
+            ? h('span', { class: 'meter meter--tile', 'aria-hidden': 'true' }, [
+                h('span', { class: 'meter__fill', dataset: { testid: 'tile-meter-self' } }),
+              ])
+            : null,
+          hear
+            ? h(
+                'span',
+                { class: ['tile__hear', `tile__hear--${hear.tone}`], dataset: { testid: `hear-${id}`, tone: hear.tone } },
+                [biNode(hear.pair, { inline: true })],
+              )
+            : null,
         ]),
         h('div', { class: 'tile__icons' }, [
           // Two indicators for mute -- the glyph plus a desaturated avatar. One alone is
@@ -392,18 +507,151 @@ export function createRoomView({ store, bus, EVENTS }) {
   }
 
   // ---------------------------------------------------------------------------
+  // Microphone menu
+  // ---------------------------------------------------------------------------
+
+  function menuButton(pair, { testid, onclick, checked = null, disabled = false }) {
+    return h(
+      'button',
+      {
+        class: 'quality__option',
+        type: 'button',
+        role: checked === null ? 'menuitem' : 'menuitemradio',
+        'aria-checked': checked === null ? undefined : String(checked),
+        disabled,
+        dataset: { testid },
+        onclick,
+      },
+      [h('span', { class: 'quality__label' }, [biNode(pair, { inline: true })])],
+    );
+  }
+
+  function menuCheck(pair, { testid, checked, onchange }) {
+    const input = h('input', { type: 'checkbox', checked, dataset: { testid }, onchange: () => onchange(input.checked) });
+    return h('label', { class: 'mic-menu__check' }, [input, h('span', {}, [biNode(pair, { inline: true })])]);
+  }
+
+  /** What the open menu was last built from, so a stats tick does not rebuild it under a
+   *  pointer that is mid-press. */
+  let micMenuKey = null;
+
+  function renderMicMenu() {
+    const { ui, audio, self } = store.state;
+    el.micMenuToggle.setAttribute('aria-expanded', String(ui.micMenuOpen));
+    show(el.micMenu, ui.micMenuOpen);
+    if (!ui.micMenuOpen) {
+      micMenuKey = null;
+      return;
+    }
+
+    const currentId = self.micDevice?.settings?.deviceId ?? null;
+    const options = deviceOptions(audio.devices);
+    const processing = audio.processing ?? self.micDevice?.settings ?? {};
+    const key = JSON.stringify([
+      options,
+      currentId,
+      self.micDevice?.label ?? null,
+      processing.echoCancellation,
+      processing.noiseSuppression,
+      processing.autoGainControl,
+      audio.selfTest?.state,
+      audio.selfTest?.verdict,
+      audio.selfTest?.blobUrl,
+      audio.incomingMutedForTest,
+    ]);
+    if (key === micMenuKey) return;
+    micMenuKey = key;
+
+    const deviceButtons = options.map((o) => {
+      const checked = currentId === o.deviceId;
+      return menuButton({ en: o.label }, {
+        testid: `mic-device-${o.deviceId.slice(0, 12)}`,
+        checked,
+        onclick: () => {
+          store.setUI({ micMenuOpen: false });
+          bus.emit(EVENTS.INTENT_SET_MIC_DEVICE, { deviceId: o.deviceId });
+        },
+      });
+    });
+    const checks = [
+      ['echoCancellation', MIC_MENU.aec, 'mic-proc-aec'],
+      ['noiseSuppression', MIC_MENU.ns, 'mic-proc-ns'],
+      ['autoGainControl', MIC_MENU.agc, 'mic-proc-agc'],
+    ].map(([key, pair, testid]) =>
+      menuCheck(pair, {
+        testid,
+        checked: Boolean(processing[key]),
+        onchange: (checked) => bus.emit(EVENTS.INTENT_SET_MIC_PROCESSING, { patch: { [key]: checked } }),
+      }),
+    );
+
+    replace(el.micMenu, [
+      h('div', { class: 'mic-menu__section' }, [biNode(MIC_MENU.device, { inline: true })]),
+      self.micDevice?.label
+        ? h('div', { class: 'mic-menu__note', dataset: { testid: 'mic-menu-current' } }, [
+            biNode(resolve(MIC_MENU.current, { label: self.micDevice.label }), { inline: true }),
+          ])
+        : null,
+      ...deviceButtons,
+      h('div', { class: 'mic-menu__section' }, [biNode(MIC_MENU.processing, { inline: true })]),
+      ...checks,
+      h('div', { class: 'mic-menu__note' }, [biNode(MIC_MENU.processingNote, { inline: true })]),
+      h('div', { class: 'mic-menu__section' }, [biNode(MIC_MENU.tests, { inline: true })]),
+      menuButton(MIC_MENU.selfTest, {
+        testid: 'mic-selftest',
+        disabled: audio.selfTest?.state === 'recording' || audio.selfTest?.state === 'playing',
+        onclick: () => bus.emit(EVENTS.INTENT_MIC_SELFTEST),
+      }),
+      audio.selfTest?.verdict
+        ? h('div', { class: 'mic-menu__note', dataset: { testid: 'mic-selftest-result' } }, [biNode(audio.selfTest.verdict, { inline: true })])
+        : null,
+      audio.selfTest?.blobUrl
+        ? h('a', { class: 'quality__option', href: audio.selfTest.blobUrl, download: 'mic-selftest.webm', dataset: { testid: 'mic-selftest-save' } }, [
+            h('span', { class: 'quality__label' }, [biNode(SELFTEST.save, { inline: true })]),
+          ])
+        : null,
+      menuCheck(MIC_MENU.incomingMute, {
+        testid: 'mic-incoming-mute',
+        checked: audio.incomingMutedForTest,
+        onchange: () => bus.emit(EVENTS.INTENT_TOGGLE_INCOMING_AUDIO_TEST),
+      }),
+      h('div', { class: 'mic-menu__note' }, [biNode(MIC_MENU.incomingMuteNote, { inline: true })]),
+      menuButton(MIC_MENU.releaseMic, { testid: 'mic-release-test', onclick: () => bus.emit(EVENTS.INTENT_RELEASE_MIC_TEST) }),
+      menuButton(MIC_MENU.audioCheck, {
+        testid: 'mic-audio-check',
+        onclick: () => {
+          store.setUI({ micMenuOpen: false });
+          bus.emit(EVENTS.INTENT_AUDIO_CHECK);
+        },
+      }),
+      menuButton(MIC_MENU.copyDiagnostics, {
+        testid: 'mic-copy-diagnostics',
+        onclick: () => {
+          store.setUI({ micMenuOpen: false });
+          bus.emit(EVENTS.INTENT_COPY_DIAGNOSTICS);
+        },
+      }),
+    ]);
+  }
+
+  // ---------------------------------------------------------------------------
   // Stats panel
   // ---------------------------------------------------------------------------
 
   function renderStats() {
-    const { ui, quality } = store.state;
+    const { ui, quality, audio } = store.state;
     show(el.statsPanel, ui.statsOpen);
     if (!ui.statsOpen) return;
 
     const peers = store.peerList();
+    const actions = h('div', { class: 'stats__actions' }, [
+      h('button', { class: 'btn btn--secondary btn--sm', dataset: { testid: 'stats-audio-check' }, onclick: () => bus.emit(EVENTS.INTENT_AUDIO_CHECK) }, UI.statsAudioCheck),
+      h('button', { class: 'btn btn--secondary btn--sm', dataset: { testid: 'stats-copy-diagnostics' }, onclick: () => bus.emit(EVENTS.INTENT_COPY_DIAGNOSTICS) }, UI.copyDiagnostics),
+    ]);
+
     if (peers.length === 0) {
       replace(el.statsPanel, [
-        h('div', { class: 'stats' }, h('span', { class: 'stats__key' }, 'No peers connected.')),
+        h('div', { class: 'stats' }, [actions, h('span', { class: 'stats__key' }, 'No peers connected.')]),
       ]);
       return;
     }
@@ -411,14 +659,32 @@ export function createRoomView({ store, bus, EVENTS }) {
     const blocks = peers.map((peer) => {
       const s = peer.stats;
       const conn = s?.connectionType?.kind ?? 'unknown';
+      const sink = audio.sinks?.[peer.id] ?? null;
 
       return h('div', { class: 'stats__peer', dataset: { testid: `stats-${peer.id}` } }, [
-        h('div', { class: 'stats__name' }, peer.name),
+        h('div', { class: 'stats__name' }, [
+          peer.name,
+          h(
+            'button',
+            {
+              class: 'btn btn--ghost btn--sm',
+              dataset: { testid: `stats-request-dump-${peer.id}` },
+              title: UI.statsRequestPeerDiagnostics,
+              onclick: () => bus.emit(EVENTS.INTENT_REQUEST_PEER_DIAGNOSTICS, { peerId: peer.id }),
+            },
+            UI.statsRequestPeerDiagnostics,
+          ),
+        ]),
         h('div', { class: 'stats__grid' }, [
           row(UI.statsSending, fmtBitrate(s?.sendBps), 'stat-send'),
-          row(UI.statsMicSending, micSendingLabel(s), 'stat-mic-send'),
+          row(UI.statsMicSending, micSendingLabel(s), 'stat-mic-send', micSendingTone(s)),
+          row(UI.statsTheyHearYou, theyHearLabel(peer), 'stat-they-hear', theyHearTone(peer)),
           row(UI.statsReceiving, fmtBitrate(s?.recvBps), 'stat-bitrate'),
           row(UI.statsAudioReceiving, fmtBitrate(s?.audioRecvBps), 'stat-audio-recv'),
+          row(UI.statsTheirMic, inboundLabel(s?.audioIn?.mic), 'stat-their-mic', inboundTone(s?.audioIn?.mic)),
+          row(UI.statsTheirShare, inboundLabel(s?.audioIn?.shareAudio), 'stat-their-share'),
+          row(UI.statsPlayback, playbackLabel(sink), 'stat-playback', sink?.playError ? 'danger' : null),
+          row(UI.statsDirections, directionsLabel(s?.transceivers), 'stat-directions'),
           row(
             UI.statsResolution,
             s?.recvWidth ? `${s.recvWidth}x${s.recvHeight}` : '—',
@@ -439,6 +705,7 @@ export function createRoomView({ store, bus, EVENTS }) {
 
     replace(el.statsPanel, [
       h('div', { class: 'stats' }, [
+        actions,
         h('div', { class: 'stats__grid', style: { marginBottom: 'var(--space-3)' } }, [
           row(UI.statsLimitedBy, limitedByLabel(quality.limitedBy), 'stat-limited-by'),
         ]),
@@ -447,31 +714,85 @@ export function createRoomView({ store, bus, EVENTS }) {
     ]);
   }
 
-  function row(key, value, testid) {
+  function row(key, value, testid, tone = null) {
     return [
       h('span', { class: 'stats__key' }, key),
-      h('span', { class: 'stats__val', dataset: { testid } }, value ?? '—'),
+      h('span', { class: ['stats__val', tone && `stats__val--${tone}`], dataset: { testid } }, value ?? '—'),
     ];
   }
 
   /**
    * Why the far end cannot hear you, narrowed to an answer you can act on.
    *
-   * The distinction that matters is **whether a microphone is attached to this connection at
-   * all**. No outbound audio report means it is not, which is a fault and was previously
-   * invisible from either end. A report means it is, and the number is what is leaving.
-   *
-   * Mute is reported from local state rather than inferred from the bitrate, because muting
-   * here is `track.enabled = false`: the RTP session deliberately stays up and keeps sending
-   * silence -- measured at around 14 kbps. A muted microphone therefore looks almost exactly
-   * like a quiet one on the wire, which is precisely why the `mute-state` message has to exist
-   * at all, and why guessing from traffic would be wrong.
+   * Three states now, because two were not enough. **No outbound audio report** means the
+   * microphone is not attached to this connection at all -- a fault. **Muted** is reported
+   * from local state, because muting is `track.enabled = false` and the RTP session keeps
+   * sending ~14 kbps of encoded silence. And an unmuted sender is judged by the SOUND the
+   * encoder was given (`media-source.totalAudioEnergy`), not the bytes: a microphone that
+   * delivers digital silence produces exactly the bitrate a working one does, and that was
+   * the gap three reports of "he can't hear me" fell through.
    */
   function micSendingLabel(sample) {
     if (!sample) return '—';
     if (!sample.hasMicSender) return UI.statsMicNotSent;
     const rate = fmtBitrate(sample.micSendBps);
-    return store.state.self.micMuted ? `${rate} — ${UI.statsMicMuted}` : rate;
+    if (store.state.self.micMuted) return `${rate} — ${UI.statsMicMuted}`;
+    if (sample.micSpeech === true) return `${rate} · ${resolve(STATS_AUDIO.speech, { level: sample.micRms ?? sample.micAudioLevel }).en}`;
+    if (sample.micSpeech === false) return `${rate} · ${STATS_AUDIO.silent.en}`;
+    return rate;
+  }
+
+  function micSendingTone(sample) {
+    if (!sample) return null;
+    if (!sample.hasMicSender) return 'danger';
+    if (store.state.self.micMuted) return 'warn';
+    if (sample.micSpeech === true) return 'ok';
+    if (sample.micSpeech === false) return 'danger';
+    return null;
+  }
+
+  function inboundLabel(entry) {
+    if (!entry) return STATS_AUDIO.unknown.en;
+    const level = entry.rms ?? entry.level;
+    if (entry.speech === true) return resolve(STATS_AUDIO.hearing, { level }).en;
+    if (entry.speech === false) return STATS_AUDIO.quiet.en;
+    return entry.bps != null ? fmtBitrate(entry.bps) : STATS_AUDIO.unknown.en;
+  }
+
+  function inboundTone(entry) {
+    if (!entry) return null;
+    if (entry.speech === true) return 'ok';
+    return null;
+  }
+
+  function playbackLabel(sink) {
+    if (!sink) return STATS_AUDIO.noElement.en;
+    if (sink.playError) return resolve(STATS_AUDIO.blocked, { error: sink.playError }).en;
+    if (sink.muted) return TILE.mutedForTest.en;
+    if (sink.paused) return STATS_AUDIO.paused.en;
+    return STATS_AUDIO.playing.en;
+  }
+
+  function directionsLabel(transceivers) {
+    if (!transceivers?.length) return '—';
+    return transceivers
+      .map((t) => `${t.role} ${t.direction ?? '?'}/${t.currentDirection ?? '?'}`)
+      .join(' · ');
+  }
+
+  function theyHearLabel(peer) {
+    const line = hearLine(peer);
+    if (line) return line.pair.en;
+    const report = peer.hearsMe;
+    if (!report || Date.now() - report.at > REPORT_STALE_MS) return STATS_AUDIO.unknown.en;
+    if (store.state.self.micMuted) return UI.statsMicMuted;
+    return Number.isFinite(report.level) ? `level ${report.level.toFixed(2)}` : STATS_AUDIO.unknown.en;
+  }
+
+  function theyHearTone(peer) {
+    const line = hearLine(peer);
+    if (!line) return null;
+    return line.tone === 'ok' ? 'ok' : line.tone === 'bad' ? 'danger' : 'warn';
   }
 
   function connectionLabel(kind) {
@@ -515,19 +836,104 @@ export function createRoomView({ store, bus, EVENTS }) {
     el.stageVideo.srcObject = null;
   }
 
-  /** Remote audio gets its own element per peer, so per-peer volume stays possible and the
-   *  stage video element can remain muted. */
+  function facts(peerId) {
+    let entry = sinkFacts.get(peerId);
+    if (!entry) {
+      entry = { playError: null, lastEvent: null, lastEventAt: null, playAttempts: 0, tracks: [] };
+      sinkFacts.set(peerId, entry);
+    }
+    return entry;
+  }
+
+  /**
+   * Remote audio gets its own element per peer, so per-peer volume stays possible and the
+   * stage video element can remain muted.
+   *
+   * A refused `play()` is no longer swallowed: it is the difference between "they are silent"
+   * and "my browser is not playing them", and it is logged, recorded for the stats panel and
+   * announced so the composition root can offer a click to fix it.
+   */
   function attachRemoteAudio(peerId, track) {
     let audio = audioElements.get(peerId);
+    const f = facts(peerId);
     if (!audio) {
       audio = h('audio', { autoplay: true, playsInline: true });
+      audio.muted = incomingMuted;
+      audio.dataset.peerId = peerId;
       audioElements.set(peerId, audio);
       el.audioSinks.append(audio);
+      for (const type of ['playing', 'pause', 'stalled', 'suspend', 'error', 'waiting']) {
+        audio.addEventListener(type, () => {
+          f.lastEvent = type;
+          f.lastEventAt = Date.now();
+          if (type === 'error') logger.warn('audio: remote element error', { peerId, code: audio.error?.code ?? null });
+        });
+      }
     }
     const existing = audio.srcObject;
     if (existing instanceof MediaStream) existing.addTrack(track);
     else audio.srcObject = new MediaStream([track]);
-    audio.play().catch(() => {});
+
+    for (const type of ['mute', 'unmute', 'ended']) {
+      track.addEventListener(type, () => logger.info(`audio: remote track ${type}`, { peerId, kind: track.kind, id: track.id }));
+    }
+
+    playSink(peerId, audio);
+  }
+
+  function playSink(peerId, audio) {
+    const f = facts(peerId);
+    f.playAttempts++;
+    audio
+      .play()
+      .then(() => {
+        if (f.playError) logger.info('audio: remote playback resumed', { peerId });
+        f.playError = null;
+      })
+      .catch((err) => {
+        const name = err?.name ?? 'play-rejected';
+        f.playError = name;
+        logger.warn('audio: play rejected', { peerId, name, message: err?.message });
+        bus.emit(EVENTS.AUDIO_PLAYBACK_BLOCKED, { peerId, name });
+      });
+  }
+
+  /** Read-only state of one peer's <audio> element, for reports and the stats panel. */
+  function audioSinkState(peerId) {
+    const audio = audioElements.get(peerId);
+    if (!audio) return null;
+    const f = facts(peerId);
+    const stream = audio.srcObject instanceof MediaStream ? audio.srcObject : null;
+    return {
+      paused: audio.paused,
+      readyState: audio.readyState,
+      networkState: audio.networkState,
+      muted: audio.muted,
+      volume: audio.volume,
+      sinkId: audio.sinkId ?? '',
+      currentTime: Math.round(audio.currentTime * 10) / 10,
+      playError: f.playError,
+      lastEvent: f.lastEvent,
+      lastEventAt: f.lastEventAt,
+      playAttempts: f.playAttempts,
+      tracks: (stream?.getTracks() ?? []).map((t) => ({ id: t.id, kind: t.kind, muted: t.muted, readyState: t.readyState, enabled: t.enabled })),
+    };
+  }
+
+  function allSinkStates() {
+    const out = {};
+    for (const peerId of audioElements.keys()) out[peerId] = audioSinkState(peerId);
+    return out;
+  }
+
+  /** Try every element again, inside a user gesture. */
+  function resumeAllAudio() {
+    for (const [peerId, audio] of audioElements) playSink(peerId, audio);
+  }
+
+  function setIncomingMuted(flag) {
+    incomingMuted = Boolean(flag);
+    for (const audio of audioElements.values()) audio.muted = incomingMuted;
   }
 
   function removePeerMedia(peerId) {
@@ -537,6 +943,7 @@ export function createRoomView({ store, bus, EVENTS }) {
       audio.remove();
       audioElements.delete(peerId);
     }
+    sinkFacts.delete(peerId);
   }
 
   /** Drop every remote audio element. Needed after our own reconnect, where the peers keep
@@ -550,17 +957,24 @@ export function createRoomView({ store, bus, EVENTS }) {
   // Banners
   // ---------------------------------------------------------------------------
 
+  /** `message` may be a string or a Node (a bilingual pair rendered with biNode). */
   function showBanner(kind, message, action) {
     show(el.roomBanner, true);
     el.roomBanner.className = `banner banner--${kind}`;
     replace(el.roomBanner, [
-      h('span', { class: 'banner__text', dataset: { testid: 'room-banner' } }, message),
-      action ? h('button', { class: 'btn btn--sm btn--secondary', onclick: action.onClick }, action.label) : null,
+      message instanceof Node
+        ? h('span', { class: 'banner__text', dataset: { testid: 'room-banner' } }, [message])
+        : h('span', { class: 'banner__text', dataset: { testid: 'room-banner' } }, message),
+      action ? h('button', { class: 'btn btn--sm btn--secondary', dataset: { testid: 'room-banner-action' }, onclick: action.onClick }, action.label) : null,
     ]);
   }
 
   function hideBanner() {
     show(el.roomBanner, false);
+    // Cleared as well as hidden: a stale message must not survive to be read by a screen
+    // reader, a test, or the next showBanner that forgets to replace it. The empty text span
+    // keeps its test id so "the banner says nothing" is observable.
+    replace(el.roomBanner, [h('span', { class: 'banner__text', dataset: { testid: 'room-banner' } }, '')]);
   }
 
   function setShareLink(link) {
@@ -575,6 +989,7 @@ export function createRoomView({ store, bus, EVENTS }) {
   store.subscribe('self', () => {
     renderSelfControls();
     renderRoster();
+    renderMicMenu();
   });
   store.subscribe('peers', () => {
     renderRoster();
@@ -591,6 +1006,19 @@ export function createRoomView({ store, bus, EVENTS }) {
   store.subscribe('ui', () => {
     renderQuality();
     renderStats();
+    renderMicMenu();
+  });
+  let lastHealthCode = null;
+  store.subscribe('audio', () => {
+    renderMicMenu();
+    renderStats();
+    // The self tile's "nobody can hear you" line reads the verdict; rebuild the roster only
+    // when the verdict actually changed, not on every meter or sink patch.
+    const code = store.state.audio.health?.code ?? null;
+    if (code !== lastHealthCode) {
+      lastHealthCode = code;
+      renderRoster();
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -613,16 +1041,46 @@ export function createRoomView({ store, bus, EVENTS }) {
     cls(bar, 'meter__fill--dead', dead);
   }
 
-  function setLobbyMicLevel(level, { dead = false } = {}) {
-    paintMeter(el.lobbyMeter, level, { dead });
+  /** `muted` here is the OS mute the lobby check saw on the track, painted in the same amber
+   *  the room uses for "working but not sent". */
+  function setLobbyMicLevel(level, { dead = false, muted = false } = {}) {
+    paintMeter(el.lobbyMeter, level, { dead, muted });
   }
 
-  function setLobbyMicStatus(message) {
-    text(el.lobbyMicStatus, String(message ?? ''));
+  /** @param {{severity?: 'warn'|'danger'|null}} [options]  colours the line; null is the plain hint */
+  function setLobbyMicStatus(message, { severity = null } = {}) {
+    if (message instanceof Node) replace(el.lobbyMicStatus, [message]);
+    else text(el.lobbyMicStatus, String(message ?? ''));
+    cls(el.lobbyMicStatus, 'field__hint--warn', severity === 'warn');
+    cls(el.lobbyMicStatus, 'field__hint--danger', severity === 'danger');
   }
 
-  function setStageMicLevel(level) {
-    paintMeter(el.overlayMeter, level, { muted: store.state.self.micMuted });
+  /**
+   * The in-room level, on every bar that shows it: the control-bar button (always visible),
+   * the self tile, and the fullscreen overlay. The tile's bar is looked up on every call
+   * because tiles are rebuilt on every 'self' emit; a cached node would go stale silently.
+   */
+  function setStageMicLevel(level, { dead = false } = {}) {
+    lastLevel = level;
+    lastDead = dead;
+    const opts = { muted: store.state.self.micMuted, dead };
+    paintMeter(el.ctlMeter, level, opts);
+    paintMeter(el.overlayMeter, level, opts);
+    const tileFill = el.rosterList.querySelector('[data-testid="tile-meter-self"]');
+    if (tileFill) paintMeter(tileFill, level, opts);
+  }
+
+  /** The one-line verdict above the mic button. Null hides it. */
+  function setMicHint(message, severity = null) {
+    if (!message) {
+      show(el.micHint, false);
+      return;
+    }
+    if (message instanceof Node) replace(el.micHint, [message]);
+    else text(el.micHint, message);
+    el.micHint.className = `ctl__hint${severity ? ` ctl__hint--${severity}` : ''}`;
+    el.micHint.dataset.severity = severity ?? '';
+    show(el.micHint, true);
   }
 
   // ---------------------------------------------------------------------------
@@ -682,7 +1140,7 @@ export function createRoomView({ store, bus, EVENTS }) {
   document.addEventListener('keydown', (event) => {
     // Not while typing a name or an access code.
     const tag = document.activeElement?.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     if (event.key === 'f' || event.key === 'F') {
       event.preventDefault();
       void toggleFullscreen();
@@ -693,6 +1151,7 @@ export function createRoomView({ store, bus, EVENTS }) {
     clearTimeout(overlayIdleTimer);
     clearInterval(sessionTimer);
     for (const [peerId] of audioElements) removePeerMedia(peerId);
+    setMicHint(null);
   }
 
   return {
@@ -700,6 +1159,7 @@ export function createRoomView({ store, bus, EVENTS }) {
     setLobbyMode,
     setLobbyBusy,
     showLobbyError,
+    setLobbyDevices,
     enterRoom,
     setShareLink,
     showBanner,
@@ -710,9 +1170,14 @@ export function createRoomView({ store, bus, EVENTS }) {
     attachRemoteAudio,
     removePeerMedia,
     removeAllPeerMedia,
+    audioSinkState,
+    allSinkStates,
+    resumeAllAudio,
+    setIncomingMuted,
     setLobbyMicLevel,
     setLobbyMicStatus,
     setStageMicLevel,
+    setMicHint,
     toggleFullscreen,
     isFullscreen,
     renderAll() {
@@ -722,6 +1187,7 @@ export function createRoomView({ store, bus, EVENTS }) {
       renderRoster();
       renderQuality();
       renderStats();
+      renderMicMenu();
     },
     destroy,
   };
