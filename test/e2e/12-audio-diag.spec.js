@@ -158,6 +158,153 @@ test('Mute incoming audio (test) mutes every remote audio element and says so', 
   await guestCtx.close();
 });
 
+test('a participant can be turned up past what the element alone can reach', async ({ browser }) => {
+  // `HTMLMediaElement.volume` is clamped to 1 by the specification, so anything above 100% has
+  // to leave the element and go through Web Audio. The two things worth pinning are that the
+  // gain actually reaches the graph, and that the element is muted once it does -- otherwise
+  // the peer is audible twice, once boosted and once not.
+  const hostCtx = await browser.newContext({ permissions: ['microphone'] });
+  const guestCtx = await browser.newContext({ permissions: ['microphone'] });
+  const host = await hostCtx.newPage();
+  const guest = await guestCtx.newPage();
+
+  const roomUrl = await createRoom(host, 'Host');
+  await joinRoom(guest, roomUrl, 'Guest');
+  await waitConnected(host, 1);
+  const guestId = await selfId(guest);
+
+  await expect
+    .poll(() => host.locator('#audio-sinks audio').count(), { timeout: 20_000 })
+    .toBeGreaterThan(0);
+
+  await openMicMenu(host);
+  const slider = host.getByTestId(`peer-volume-${guestId}`);
+  await expect(slider).toBeVisible();
+  await expect(host.getByTestId(`peer-volume-value-${guestId}`)).toHaveText('100%');
+
+  // Nothing is built until a slider moves: an AudioContext for every call would be a real cost
+  // paid by everyone who never touches this.
+  expect(await host.evaluate(() => window.__app.mixer().active)).toBe(false);
+
+  await slider.fill('300');
+  await slider.dispatchEvent('input');
+
+  await expect(host.getByTestId(`peer-volume-value-${guestId}`)).toHaveText('300%');
+  await expect
+    .poll(() => host.evaluate((id) => window.__app.audioSinks()[id]?.gain ?? null, guestId), {
+      timeout: 10_000,
+      message: 'the gain should reach the playback graph',
+    })
+    .toBe(3);
+
+  const sink = await host.evaluate((id) => window.__app.audioSinks()[id], guestId);
+  expect(sink.outputVia, 'above 100% the element cannot carry it').toBe('webaudio');
+  expect(sink.muted, 'the element is silenced so nobody is heard twice').toBe(true);
+  expect(await host.evaluate(() => window.__app.mixer().active)).toBe(true);
+
+  // And it survives the menu being rebuilt, which happens on every stats tick.
+  await host.waitForTimeout(2500);
+  await expect(host.getByTestId(`peer-volume-${guestId}`)).toHaveValue('300');
+  expect(await host.evaluate(() => window.__app.peerVolumes())).toEqual({ [guestId]: 3 });
+
+  await hostCtx.close();
+  await guestCtx.close();
+});
+
+test('the speaker picker routes every remote element at once', async ({ browser }) => {
+  // Asserted through the recorded sinkId rather than by listening: setSinkId in headless
+  // Chromium reports success without any audible consequence, so "did it play out of the right
+  // speaker" is not a question this suite can ask. What it can pin is that the choice reaches
+  // every element, present and future, which is where the bug would be.
+  const hostCtx = await browser.newContext({ permissions: ['microphone'] });
+  const guestCtx = await browser.newContext({ permissions: ['microphone'] });
+  const host = await hostCtx.newPage();
+  const guest = await guestCtx.newPage();
+
+  const roomUrl = await createRoom(host, 'Host');
+  await joinRoom(guest, roomUrl, 'Guest');
+  await waitConnected(host, 1);
+
+  await expect
+    .poll(() => host.locator('#audio-sinks audio').count(), { timeout: 20_000 })
+    .toBeGreaterThan(0);
+
+  await openMicMenu(host);
+  const supported = await host.evaluate(() => 'setSinkId' in HTMLMediaElement.prototype);
+  if (!supported) {
+    await expect(host.getByTestId('speaker-unsupported')).toBeVisible();
+    await hostCtx.close();
+    await guestCtx.close();
+    return;
+  }
+
+  await expect
+    .poll(() => host.locator('[data-testid^="speaker-device-"]').count(), {
+      timeout: 10_000,
+      message: 'the menu should list at least one output device',
+    })
+    .toBeGreaterThan(0);
+
+  await host.locator('[data-testid^="speaker-device-"]').first().click();
+  await expect
+    .poll(() => host.evaluate(() => window.__app.speakerDevice()), { timeout: 5_000 })
+    .not.toBe(null);
+
+  const chosen = await host.evaluate(() => window.__app.speakerDevice());
+  // Every element, not just the first: the loop is the whole point.
+  await expect
+    .poll(
+      () =>
+        host.evaluate(() =>
+          [...document.querySelectorAll('#audio-sinks audio')].map((a) => a.sinkId ?? ''),
+        ),
+      { timeout: 10_000 },
+    )
+    .toEqual(expect.arrayContaining([chosen]));
+
+  // And it is remembered for the tab, so a reload does not send the call back to the laptop
+  // speakers without saying so.
+  const stored = await host.evaluate(() => JSON.parse(sessionStorage.getItem('streamer:audio') ?? '{}'));
+  expect(stored.speakerDeviceId).toBe(chosen);
+
+  await hostCtx.close();
+  await guestCtx.close();
+});
+
+test('a banner takes one strip of the page, not the stage', async ({ browser }) => {
+  // The regression this pins: `.room` declared three grid rows for four children. While the
+  // banner was hidden it was not placed at all and the layout looked right; the moment one
+  // appeared it landed on the `1fr` row, grew to the whole remaining viewport, and squeezed the
+  // entire stage and roster into the control bar's 72px. A banner is a strip. Assert the size,
+  // because "it looked fine in the screenshot with no banner" is exactly how this shipped.
+  const ctx = await browser.newContext({ permissions: ['microphone'] });
+  const guestCtx = await browser.newContext({ permissions: ['microphone'] });
+  const host = await ctx.newPage();
+  const guest = await guestCtx.newPage();
+
+  const roomUrl = await createRoom(host, 'Host');
+  await joinRoom(guest, roomUrl, 'Guest');
+  await waitConnected(host, 1);
+
+  const bodyHeight = () => host.locator('.room__body').evaluate((el) => el.getBoundingClientRect().height);
+  const before = await bodyHeight();
+  expect(before, 'the room body should own most of the viewport to begin with').toBeGreaterThan(200);
+
+  await openMicMenu(host);
+  await host.getByTestId('mic-incoming-mute').check();
+  await expect(host.getByTestId('room-banner')).toBeVisible();
+
+  const bannerHeight = await host.locator('#room-banner').evaluate((el) => el.getBoundingClientRect().height);
+  expect(bannerHeight, 'a banner is a strip, not a panel').toBeLessThan(80);
+  expect(bannerHeight).toBeGreaterThan(0);
+
+  const after = await bodyHeight();
+  expect(after, 'the stage should lose only the banner strip').toBeGreaterThan(before - bannerHeight - 4);
+
+  await ctx.close();
+  await guestCtx.close();
+});
+
 test('Copy diagnostics shows a JSON blob with the expected shape', async ({ browser }) => {
   // The dump is what a support conversation runs on. Its shape is the contract: a person
   // debugging later needs the environment, the mic the browser opened, the meter, every remote

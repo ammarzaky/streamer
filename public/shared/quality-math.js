@@ -68,7 +68,14 @@ export const PRESETS = Object.freeze([
     frameRate: 30,
     maxBitrateBps: 3_500_000,
     contentHint: 'detail',
-    degradationPreference: 'maintain-resolution',
+    // 'balanced', not 'maintain-resolution', because this is the DEFAULT rung and a default
+    // must not have a cliff. Measured: three peers sharing a moving 1080p source with
+    // 'maintain-resolution' never decoded a frame inside 25 s -- the encoder refuses to scale
+    // down, so under three simultaneous encodes it starves the frame rate to nothing and the
+    // picture simply stops. 'balanced' lets it give up some resolution instead of freezing,
+    // and on the static screens this preset exists for there is no pressure to resolve either
+    // way. Someone who wants resolution held at any cost has 720p30 one rung down.
+    degradationPreference: 'balanced',
   },
   {
     id: '1080p60',
@@ -84,6 +91,17 @@ export const PRESETS = Object.freeze([
 ]);
 
 export const PRESET_IDS = Object.freeze(PRESETS.map((p) => p.id));
+
+/**
+ * The client-side fallback when the server sends no preset. **Must equal `media.defaultPreset`
+ * in config.default.json** -- a unit test asserts it, because a fallback that disagrees with the
+ * configured default is a difference nobody notices until one client is on a different rung
+ * from the rest of the room.
+ *
+ * The top of the ladder, and it can be: the preset only sets the ceiling. Whether those bits go
+ * into frame rate or into per-frame sharpness is decided from the capture itself -- see
+ * `trackContentMode` below -- so this no longer forces a film's answer onto a code editor.
+ */
 export const DEFAULT_PRESET_ID = '1080p60';
 
 export function getPreset(id) {
@@ -191,6 +209,97 @@ export function isBandwidthGenuinelyShort(sample, capBps) {
   // Firefox does not always expose an estimate. Falling back to the weaker send-rate test is
   // better than never adapting there -- but only here, where nothing better is available.
   return Number.isFinite(sample.actualBitrateBps) && sample.actualBitrateBps < capBps * 0.6;
+}
+
+// ---------------------------------------------------------------------------
+// Content mode: still picture, or moving one?
+// ---------------------------------------------------------------------------
+
+/**
+ * A shared screen is two completely different problems wearing one name.
+ *
+ * A code editor or a document is a STILL picture that changes occasionally. A desktop capturer
+ * only emits frames that changed, so such a surface produces one to three frames per second no
+ * matter what the preset asks for -- and a 'motion' hint paired with `maintain-framerate` then
+ * spends the whole bitrate protecting a frame rate nobody is producing, in the one currency the
+ * viewer can see. That was measured in the field: 1728x1080 arriving at 2 fps and 47 kbps,
+ * soft in every direction.
+ *
+ * Video or a game is the opposite: a genuinely moving picture where a sharp still frame every
+ * fifth of a second is a slideshow.
+ *
+ * Neither preset is wrong -- they are answers to different questions, and only the capture can
+ * say which question is being asked. This decides from `media-source.framesPerSecond`, which is
+ * the capturer's own rate. Deliberately NOT `outbound-rtp`: telling the encoder the content is
+ * still is exactly what makes its frame rate fall, so deciding from the encoded rate would
+ * latch on the first reading and never come back.
+ */
+export const CONTENT_FPS = Object.freeze({
+  /**
+   * At or below this the surface is not animating. Set from what was measured, in both
+   * directions: a code editor being read arrived at 2 fps in the field, and a genuinely moving
+   * source that the machine could barely keep up with -- a redrawn canvas under three encoders
+   * -- still produced 5. The first version sat at 8 and called the second one a document.
+   * Erring high mislabels moving content, which is the costly mistake; erring low only leaves
+   * a still screen on the settings it always had.
+   */
+  still: 3,
+  /** Above this it is moving. The gap between the two is the hysteresis. */
+  moving: 10,
+  /** Consecutive samples (one per second) required to change the answer. Eight, because the
+   *  wrong answer here is expensive and a still picture is in no hurry. */
+  samples: 8,
+});
+
+export function createContentTracker() {
+  return { mode: null, stillRun: 0, movingRun: 0 };
+}
+
+/**
+ * Fold one source-frame-rate reading into the tracker. Returns the mode to use now:
+ * 'still' | 'moving' | null (not yet decided -- use the preset's own settings).
+ *
+ * Pure apart from mutating the tracker it is given, so every rule here is a unit test.
+ */
+export function trackContentMode(tracker, sourceFps) {
+  // A reading of zero is not a still picture, it is an absent one: a capture that has just
+  // started, or one whose stats report caught it mid-restart. Measured -- a synthetic 60fps
+  // canvas reported `framesPerSecond: 0` with its frame counter reset to 1 for one sample, and
+  // four seconds later the tracker had declared it a document. Even a completely static screen
+  // emits the occasional frame; a sustained literal zero means nothing is being captured.
+  if (!Number.isFinite(sourceFps) || sourceFps <= 0) {
+    // No reading is not evidence either way, and must not decay a decision already made.
+    return tracker.mode;
+  }
+
+  if (sourceFps <= CONTENT_FPS.still) {
+    tracker.stillRun += 1;
+    tracker.movingRun = 0;
+  } else if (sourceFps > CONTENT_FPS.moving) {
+    tracker.movingRun += 1;
+    tracker.stillRun = 0;
+  } else {
+    // Between the two thresholds: ambiguous, so it neither builds nor breaks a run.
+    return tracker.mode;
+  }
+
+  if (tracker.stillRun >= CONTENT_FPS.samples) tracker.mode = 'still';
+  else if (tracker.movingRun >= CONTENT_FPS.samples) tracker.mode = 'moving';
+  return tracker.mode;
+}
+
+/**
+ * The encoder settings a preset should actually run with, given what the capture is doing.
+ *
+ * `still` overrides both levers together, because they are one decision: hint the encoder that
+ * detail matters, and stop it protecting a frame rate the source is not producing.
+ * `degradationPreference` becomes 'balanced' rather than 'maintain-resolution' -- measured,
+ * three peers encoding 1080p with resolution pinned produced no decodable frame in 25 seconds,
+ * and a still picture that never arrives is worse than a slightly smaller one that does.
+ */
+export function encoderSettingsFor(preset, mode) {
+  if (mode === 'still') return { contentHint: 'detail', degradationPreference: 'balanced' };
+  return { contentHint: preset.contentHint, degradationPreference: preset.degradationPreference };
 }
 
 // ---------------------------------------------------------------------------

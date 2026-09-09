@@ -116,6 +116,9 @@ export const UI = {
   qualityLoweredCpu: (preset) => `Quality lowered to ${preset} — this device is at its limit.`,
   qualityLoweredNetwork: (preset) => `Quality lowered to ${preset} — not enough upload speed.`,
   qualityRaiseSuggestion: (preset) => `Network looks good. Try ${preset}?`,
+  /** The control-bar label while somebody ELSE is sharing and no frame has arrived yet. The
+   *  preset would be a lie there: it describes a stream this client is not sending. */
+  qualityReceiving: 'Receiving…',
 
   // -- Stats panel --
   statsTarget: 'Target',
@@ -141,6 +144,13 @@ export const UI = {
   statsResolution: 'Resolution',
   statsConnection: 'Connection',
   statsLimitedBy: 'Limited by',
+  /** What the capture is doing, and therefore how the preset's bitrate is being spent. Shown
+   *  because "1080p 60" next to two frames a second reads as a fault rather than a choice. */
+  /** The accessible name of a per-participant volume slider, prefixed with their name. */
+  volumeLabel: 'volume',
+  statsContent: 'Content',
+  contentStill: 'Still picture — sharpness over frame rate',
+  contentMoving: 'Moving — frame rate over sharpness',
   statsPacketLoss: 'Packet loss',
   statsRoundTrip: 'Round trip',
 

@@ -14,15 +14,25 @@ import { SPEAKING_THRESHOLD } from '../../public/js/media/level-meter.js';
 const SPEECH = 0.3; // clearly above SPEAKING_THRESHOLD
 const QUIET = 0.03; // above SILENT_LEVEL, below SPEAKING_THRESHOLD
 
-/** A connected peer that carries our microphone and, optionally, reports what it hears. */
+/**
+ * A connected peer that carries our microphone and, optionally, reports what it hears.
+ *
+ * `micRms` is OUR microphone as that connection's encoder saw it -- the second witness the
+ * silence rule needs. It defaults to null (not measured), which is why a peer built with the
+ * bare helper cannot on its own convict the microphone of silence.
+ */
 const peer = (over = {}) => ({
   id: 'p1',
   name: 'Bob',
   pcState: 'connected',
   hasMicSender: true,
+  micRms: null,
   hearsMe: null,
   ...over,
 });
+
+/** A peer whose encoder agrees with a silent meter: the pair that makes CAPTURE_SILENT possible. */
+const encoderSilent = (over = {}) => peer({ micRms: 0, ...over });
 
 const hears = (level, at, playing) => ({ level, at, ...(playing === undefined ? {} : { playing }) });
 
@@ -33,7 +43,7 @@ function runAt(snapshot, times, tracker = createHealthTracker()) {
   return out;
 }
 
-const LONG = 10_000; // longer than every hold in HOLD_MS
+const LONG = 60_000; // longer than every hold in HOLD_MS
 
 /** Minimal snapshot per code. Each is mergeable with the others for the precedence tests. */
 const CASES = {
@@ -41,7 +51,11 @@ const CASES = {
   [HEALTH.ENGINE_SUSPENDED]: { meter: { contextState: 'suspended', level: SPEECH } },
   [HEALTH.TRACK_ENDED]: { meter: { contextState: 'running', reason: 'track-ended', level: SPEECH } },
   [HEALTH.SOURCE_MUTED]: { self: { micSourceMuted: true }, meter: { contextState: 'running', level: SPEECH } },
-  [HEALTH.CAPTURE_SILENT]: { self: { micMuted: false, lobbyPeak: 0.4 }, meter: { contextState: 'running', level: 0 } },
+  [HEALTH.CAPTURE_SILENT]: {
+    self: { micMuted: false, lobbyPeak: 0.4 },
+    meter: { contextState: 'running', level: 0 },
+    peers: [encoderSilent()],
+  },
   [HEALTH.NOT_ATTACHED]: {
     meter: { contextState: 'running', level: SPEECH },
     peers: [peer({ id: 'd', name: 'Dana', hasMicSender: false })],
@@ -132,29 +146,52 @@ test('CAPTURE_SILENT requires HOLD_MS.CAPTURE_SILENT of unmuted silence', () => 
 });
 
 test('CAPTURE_SILENT reports lobbyWorked=false when the lobby never saw speech', () => {
-  const out = runAt({ self: { micMuted: false }, meter: { level: 0 } }, [0, LONG]);
+  const out = runAt({ self: { micMuted: false }, meter: { level: 0 }, peers: [encoderSilent()] }, [0, LONG]);
   assert.equal(out.code, HEALTH.CAPTURE_SILENT);
   assert.equal(out.params.lobbyWorked, false);
 });
 
 test('the silence timer restarts when sound is detected in between', () => {
   const tracker = createHealthTracker();
-  const silent = { self: { micMuted: false }, meter: { level: 0 } };
+  const silent = { self: { micMuted: false }, meter: { level: 0 }, peers: [encoderSilent()] };
   deriveAudioHealth(silent, tracker, 0);
-  deriveAudioHealth({ self: { micMuted: false }, meter: { level: QUIET } }, tracker, 4000);
+  deriveAudioHealth({ self: { micMuted: false }, meter: { level: QUIET }, peers: [encoderSilent()] }, tracker, 4000);
   deriveAudioHealth(silent, tracker, 5000);
   assert.equal(deriveAudioHealth(silent, tracker, 5000 + HOLD_MS.CAPTURE_SILENT - 1).code, HEALTH.OK);
   assert.equal(deriveAudioHealth(silent, tracker, 5000 + HOLD_MS.CAPTURE_SILENT).code, HEALTH.CAPTURE_SILENT);
 });
 
 test('a muted user is never CAPTURE_SILENT', () => {
-  const out = runAt({ self: { micMuted: true }, meter: { level: 0 } }, [0, LONG, 2 * LONG]);
+  const out = runAt({ self: { micMuted: true }, meter: { level: 0 }, peers: [encoderSilent()] }, [0, LONG, 2 * LONG]);
   assert.equal(out.code, HEALTH.OK);
 });
 
 test('an unavailable microphone is not CAPTURE_SILENT either', () => {
-  const out = runAt({ self: { micMuted: false, micAvailable: false }, meter: { level: 0 } }, [0, LONG]);
-  assert.equal(out.code, HEALTH.OK);
+  const snap = { self: { micMuted: false, micAvailable: false }, meter: { level: 0 }, peers: [encoderSilent()] };
+  assert.equal(runAt(snap, [0, LONG]).code, HEALTH.OK);
+});
+
+test('a silent meter alone is not enough: the encoder has to agree', () => {
+  // The meter watches a CLONE of the microphone. A clone that dies -- which is what Windows
+  // does under a second consumer of the same endpoint -- reads a flat zero while the track
+  // being sent is fine, and this used to be the whole basis of the verdict.
+  const meterOnly = { self: { micMuted: false }, meter: { level: 0 }, peers: [peer()] };
+  assert.equal(runAt(meterOnly, [0, LONG, 2 * LONG]).code, HEALTH.OK);
+
+  const contradicted = { self: { micMuted: false }, meter: { level: 0 }, peers: [peer({ micRms: 0.2 })] };
+  assert.equal(runAt(contradicted, [0, LONG, 2 * LONG]).code, HEALTH.OK);
+});
+
+test('alone in the room, silence raises nothing: there is no encoder to corroborate it', () => {
+  const alone = { self: { micMuted: false }, meter: { level: 0 }, peers: [] };
+  assert.equal(runAt(alone, [0, LONG, 2 * LONG]).code, HEALTH.OK);
+});
+
+test('a missing meter reads as unknown, not as silence', () => {
+  // `meter: null` is what a device switch leaves behind for a moment, and what a meter that
+  // failed to build leaves behind for good.
+  const noMeter = { self: { micMuted: false }, peers: [encoderSilent()] };
+  assert.equal(runAt(noMeter, [0, LONG, 2 * LONG]).code, HEALTH.OK);
 });
 
 test('CAPTURE_SILENT is suppressed when a fresh peer report says it hears us', () => {
@@ -173,14 +210,41 @@ test('a peer report that is barely too quiet does not suppress CAPTURE_SILENT', 
   const snap = {
     self: { micMuted: false },
     meter: { level: 0 },
-    peers: [peer({ hearsMe: hears(SILENT_LEVEL / 2, LONG) })],
+    peers: [encoderSilent({ hearsMe: hears(SILENT_LEVEL / 2, LONG) })],
   };
   assert.equal(runAt(snap, [0, LONG]).code, HEALTH.CAPTURE_SILENT);
 });
 
+test('being heard recently suppresses CAPTURE_SILENT through the pauses that follow', () => {
+  // The regression this exists for: a peer's report says what they heard in the LAST SECOND,
+  // so it empties every time you stop talking to listen. Without the latch the banner appeared
+  // in the middle of a working conversation.
+  const tracker = createHealthTracker();
+  const heard = {
+    self: { micMuted: false },
+    meter: { level: 0 },
+    peers: [encoderSilent({ hearsMe: hears(0.2, 0) })],
+  };
+  deriveAudioHealth(heard, tracker, 0);
+
+  // From now on nobody reports hearing anything -- an ordinary listening turn.
+  const quiet = (at) => ({
+    self: { micMuted: false },
+    meter: { level: 0 },
+    peers: [encoderSilent({ hearsMe: hears(0, at) })],
+  });
+  const inPause = HOLD_MS.CAPTURE_SILENT + 1000;
+  assert.ok(inPause < HOLD_MS.HEARD_RECENT, 'the pause is inside the latch, which is the point');
+  assert.equal(deriveAudioHealth(quiet(inPause), tracker, inPause).code, HEALTH.OK);
+
+  // Past the latch with still nothing heard, the verdict is allowed through again.
+  const past = HOLD_MS.HEARD_RECENT + 1;
+  assert.equal(deriveAudioHealth(quiet(past), tracker, past).code, HEALTH.CAPTURE_SILENT);
+});
+
 test('a stale hearsMe report neither suppresses CAPTURE_SILENT nor counts as HEARD', () => {
   const at = LONG - HOLD_MS.REPORT_FRESH - 1;
-  const silentSnap = { self: { micMuted: false }, meter: { level: 0 }, peers: [peer({ hearsMe: hears(0.5, at) })] };
+  const silentSnap = { self: { micMuted: false }, meter: { level: 0 }, peers: [encoderSilent({ hearsMe: hears(0.5, at) })] };
   assert.equal(runAt(silentSnap, [0, LONG]).code, HEALTH.CAPTURE_SILENT);
 
   const talkingSnap = { self: { micMuted: false }, meter: { level: SPEECH }, peers: [peer({ hearsMe: hears(0.5, at) })] };

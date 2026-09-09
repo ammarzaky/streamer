@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { deriveAudio, MIC_SPEECH_RMS } from '../../public/js/stats/stats-collector.js';
+import { deriveAudio, MIC_SPEECH_RMS, SPEECH_HOLD_SEC } from '../../public/js/stats/stats-collector.js';
 
 /** Fabricated getStats reports. Field names match what browsers actually return. */
 /** deriveAudio with a mic track attached by default: the sole-report fallback needs one, and
@@ -57,6 +57,9 @@ test('the microphone is matched by track identifier when two outbound audio stre
     micDuration: 10,
     micPackets: 100,
     micBytes: 8000,
+    // audioLevel 0.02 is above MIC_SPEECH_RMS, so this sample carries speech and the quiet
+    // counter is at zero.
+    micQuietSec: 0,
     in: {},
   });
 });
@@ -182,13 +185,48 @@ test('rising energy between calls means speech, flat energy means not speech', (
   assert.equal(flat.mic.speech, false, 'interval rms wins over a stale instantaneous level');
 });
 
+test('speech is held across an ordinary pause and released once the pause is long enough', () => {
+  // Energy that stops rising is a person who stopped talking to listen. Reported raw, the panel
+  // flipped to "SILENT (mic open, no sound)" a second into every listening turn.
+  const speaking = (n) => [
+    source('S1', 't', { totalAudioEnergy: n * 0.5, totalSamplesDuration: n }),
+    outbound('O1', 'S1'),
+  ];
+  const paused = (energy, duration) => [
+    source('S1', 't', { totalAudioEnergy: energy, totalSamplesDuration: duration }),
+    outbound('O1', 'S1'),
+  ];
+
+  let out = derive(speaking(1));
+  out = derive(speaking(2), { prev: out.cumulative, dtSec: 1 });
+  assert.equal(out.mic.speech, true, 'rising energy is speech');
+
+  // Nine seconds of nothing: still counted as speaking, because a pause is not a fault.
+  const held = 0.5 * 2;
+  for (let second = 1; second <= SPEECH_HOLD_SEC - 1; second += 1) {
+    out = derive(paused(held, 2 + second), { prev: out.cumulative, dtSec: 1 });
+    assert.equal(out.mic.speech, true, `still held at ${second}s`);
+  }
+
+  out = derive(paused(held, 2 + SPEECH_HOLD_SEC), { prev: out.cumulative, dtSec: 1 });
+  assert.equal(out.mic.speech, false, 'past the hold, silence is reported');
+  assert.equal(out.mic.quietSec, SPEECH_HOLD_SEC);
+});
+
 test('a browser that reports no audioLevel and no energies yields null level, rms and speech, never false', () => {
   const values = [source('S1', 't'), outbound('O1', 'S1', { packetsSent: 5 })];
   const first = derive(values);
   assert.equal(first.mic.level, null);
   assert.equal(first.mic.rms, null);
   assert.equal(first.mic.speech, null);
-  assert.deepEqual(first.cumulative, { micEnergy: null, micDuration: null, micPackets: 5, micBytes: 0, in: {} });
+  assert.deepEqual(first.cumulative, {
+    micEnergy: null,
+    micDuration: null,
+    micPackets: 5,
+    micBytes: 0,
+    micQuietSec: SPEECH_HOLD_SEC,
+    in: {},
+  });
 
   const second = derive(values, { prev: first.cumulative, dtSec: 1 });
   assert.equal(second.mic.level, null);
@@ -351,7 +389,14 @@ test('the cumulative snapshot can be fed straight back in as prev on the next ca
   let out = null;
   for (let n = 1; n <= 3; n += 1) {
     out = derive(report(n), { roleByMid: { 0: 'mic' }, prev, dtSec: 1 });
-    assert.deepEqual(Object.keys(out.cumulative).sort(), ['in', 'micBytes', 'micDuration', 'micEnergy', 'micPackets']);
+    assert.deepEqual(Object.keys(out.cumulative).sort(), [
+      'in',
+      'micBytes',
+      'micDuration',
+      'micEnergy',
+      'micPackets',
+      'micQuietSec',
+    ]);
     prev = out.cumulative;
   }
   assert.equal(out.mic.packetsPerSec, 50);

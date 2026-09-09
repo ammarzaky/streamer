@@ -57,6 +57,16 @@ export const HOLD_MS = Object.freeze({
   REPORT_FRESH: 8000,
   /** "Recently speaking" for the unheard rules. */
   SPEAKING_RECENT: 2500,
+  /**
+   * "Recently heard" -- the latch that stops CAPTURE_SILENT firing during a conversation.
+   *
+   * A peer's report carries the level they heard from us in the LAST SECOND, so it drops to
+   * zero every time we stop talking to listen. Without a latch the suppression evaporated on
+   * the first ordinary pause and the banner appeared mid-conversation. Somebody who heard us
+   * within the last half minute is evidence that the microphone works; going quiet is not
+   * evidence that it stopped.
+   */
+  HEARD_RECENT: 30000,
 });
 
 export function createHealthTracker() {
@@ -66,6 +76,7 @@ export function createHealthTracker() {
     unheardSince: null,
     talkingMutedSince: null,
     lastSpokeAt: null,
+    lastHeardAt: null,
     shownCode: null,
     shownAt: null,
     shownParams: null,
@@ -77,6 +88,11 @@ export function createHealthTracker() {
  *   self: { micMuted, micAvailable, micError, micEnded, micSourceMuted, micLabel, lobbyPeak }
  *   meter: { contextState, dead, reason, level } | null
  *   peers: [{ id, name, pcState, hasMicSender, micRms, hearsMe: {level, playing, at} | null }]
+ *
+ * `peers[].micRms` is OUR OWN microphone as the encoder on that connection saw it
+ * (`media-source.totalAudioEnergy`), not the peer's. It is a second, independent witness to
+ * the same question the meter answers, and it does not go through the meter's clone -- which
+ * is the whole reason it matters here.
  * @param {object} tracker  from createHealthTracker(); mutated
  * @param {number} nowMs
  * @returns {{ code: string, severity: string|null, params: object, changed: boolean }}
@@ -85,23 +101,41 @@ export function deriveAudioHealth(snapshot, tracker, nowMs) {
   const self = snapshot.self ?? {};
   const meter = snapshot.meter ?? null;
   const peers = snapshot.peers ?? [];
-  const level = Number.isFinite(meter?.level) ? meter.level : 0;
+  // A missing meter is UNKNOWN, not silent. It used to read as 0, which meant a meter that
+  // failed to build -- or was torn down for a device switch -- looked exactly like a dead
+  // microphone and could raise the banner on its own.
+  const level = Number.isFinite(meter?.level) ? meter.level : null;
   const connected = peers.filter((p) => p.pcState === 'connected');
   const label = self.micLabel || '';
 
-  if (level > SPEAKING_THRESHOLD) tracker.lastSpokeAt = nowMs;
+  // The encoder's own view of the microphone, from whichever connection reports the most
+  // energy. Independent of the meter's clone, so the two can only agree by actually agreeing.
+  const encoderRms = peers.reduce(
+    (best, p) => (Number.isFinite(p.micRms) && (best === null || p.micRms > best) ? p.micRms : best),
+    null,
+  );
+
+  if (level !== null && level > SPEAKING_THRESHOLD) tracker.lastSpokeAt = nowMs;
   const speakingRecently =
     tracker.lastSpokeAt !== null && nowMs - tracker.lastSpokeAt <= HOLD_MS.SPEAKING_RECENT;
 
   // -- Timers: each condition's start is recorded while it holds and cleared when it stops. --
 
-  const unmutedAndSilent = !self.micMuted && self.micAvailable !== false && level < SILENT_LEVEL;
+  // Both witnesses must agree before the clock starts. Either one reading null is a MISSING
+  // witness, not a quiet one, and a missing witness never convicts -- which is why being alone
+  // in the room (no encoder report at all) cannot raise this verdict. That is deliberate: with
+  // nobody to hear you, the claim has no consequence, and the lobby check already covers the
+  // moment before joining.
+  const meterSilent = level !== null && level < SILENT_LEVEL;
+  const encoderSilent = encoderRms !== null && encoderRms < SILENT_LEVEL;
+  const unmutedAndSilent =
+    !self.micMuted && self.micAvailable !== false && meterSilent && encoderSilent;
   tracker.silentSince = unmutedAndSilent ? (tracker.silentSince ?? nowMs) : null;
 
   const detached = connected.find((p) => p.hasMicSender === false) ?? null;
   tracker.notAttachedSince = detached ? (tracker.notAttachedSince ?? nowMs) : null;
 
-  const talkingMuted = Boolean(self.micMuted) && level > SPEAKING_THRESHOLD;
+  const talkingMuted = Boolean(self.micMuted) && level !== null && level > SPEAKING_THRESHOLD;
   tracker.talkingMutedSince = talkingMuted ? (tracker.talkingMutedSince ?? nowMs) : null;
 
   const fresh = (p) =>
@@ -109,6 +143,14 @@ export function deriveAudioHealth(snapshot, tracker, nowMs) {
   const reporting = connected.filter(fresh);
   const heardBy =
     reporting.find((p) => Number.isFinite(p.hearsMe.level) && p.hearsMe.level >= SILENT_LEVEL) ?? null;
+  // Latched, mirroring `lastSpokeAt`. `heardBy` is a statement about the last second and drops
+  // out the instant you stop talking; `heardRecently` is the one the silence rule needs, or the
+  // suppression collapses in every conversational pause. The UNHEARD rules deliberately keep
+  // using the instantaneous `heardBy`: "I am speaking and they do not hear me right now" is a
+  // real condition even if they heard me a moment ago.
+  if (heardBy) tracker.lastHeardAt = nowMs;
+  const heardRecently =
+    tracker.lastHeardAt !== null && nowMs - tracker.lastHeardAt <= HOLD_MS.HEARD_RECENT;
   const unheardBy =
     !self.micMuted && speakingRecently && reporting.length > 0 && !heardBy
       ? (reporting.find((p) => Number.isFinite(p.hearsMe.level) && p.hearsMe.level < SILENT_LEVEL) ?? null)
@@ -134,9 +176,9 @@ export function deriveAudioHealth(snapshot, tracker, nowMs) {
     code = HEALTH.SOURCE_MUTED;
     params = { label };
   } else if (tracker.silentSince !== null && nowMs - tracker.silentSince >= HOLD_MS.CAPTURE_SILENT) {
-    // Only when nobody on the far end contradicts it: a peer whose report says they hear us
+    // Only when nobody on the far end contradicts it: a peer who has heard us recently
     // outranks a local meter that reads zero (a broken clone is not a broken microphone).
-    if (!heardBy) {
+    if (!heardRecently) {
       code = HEALTH.CAPTURE_SILENT;
       params = {
         label,

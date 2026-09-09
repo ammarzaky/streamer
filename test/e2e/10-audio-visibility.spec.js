@@ -219,21 +219,21 @@ test('a microphone that delivers silence is reported as SILENT, not as a bitrate
   await expect(micRow, 'silence must never be dressed up as speech').not.toHaveText(/speech detected/i);
   await expect(micRow, 'the sender exists; this is not a missing track').not.toHaveText(/not being sent/i);
 
-  // The health verdict needs ~8 s of unmuted silence before it commits, so give it time.
-  // Either surface is acceptable: the banner carries the long explanation, the hint under the
-  // mic button the short one.
-  await expect
-    .poll(
-      async () => {
-        const banner = (await host.getByTestId('room-banner').textContent().catch(() => '')) ?? '';
-        const hint = (await host.getByTestId('mic-hint').textContent().catch(() => '')) ?? '';
-        return `${banner}\n${hint}`;
-      },
-      { timeout: 25_000, message: 'the app should say out loud that the microphone is silent' },
-    )
-    .toMatch(/delivering silence|no sound/i);
+  // ...and it stays in the panel. The verdict used to be shouted over the stage as well, but
+  // it rests on a CLONE of the microphone that can die on its own, so it was wrong often enough
+  // -- in the middle of conversations that were working -- to lose the right to interrupt. It
+  // is reported where someone who already suspects a problem will look, and nowhere else.
+  await host.waitForTimeout(12_000);
+  const banner = (await host.getByTestId('room-banner').textContent().catch(() => '')) ?? '';
+  const hint = (await host.getByTestId('mic-hint').textContent().catch(() => '')) ?? '';
+  expect(`${banner}\n${hint}`, 'a silent capture must not raise a banner or a hint').not.toMatch(
+    /delivering silence|no sound/i,
+  );
 
-  await expect(host.getByTestId('mic-hint')).toHaveAttribute('data-severity', /warn|danger/);
+  // The Audio check still tells the whole story on demand.
+  await host.getByTestId('mic-menu-toggle').click();
+  await host.getByTestId('mic-audio-check').click();
+  await expect(host.getByTestId('audio-check')).toBeVisible();
 
   await hostCtx.close();
   await guestCtx.close();

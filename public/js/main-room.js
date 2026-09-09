@@ -493,7 +493,8 @@ function syncStage() {
 function handleStatsSample(samples) {
   for (const sample of samples) store.setPeerStats(sample.peerId, sample);
 
-  // Only the sharer's outbound numbers describe what is being sent.
+  // Only the sharer's outbound numbers describe what is being SENT -- and only the sharer's
+  // encoder can be adapted, which is why `observe` runs on this branch alone.
   if (store.sharerIsSelf()) {
     const outbound = samples.filter((s) => s.hasOutboundVideo);
     if (outbound.length) {
@@ -503,6 +504,16 @@ function handleStatsSample(samples) {
       });
       quality.observe(outbound);
     }
+  } else {
+    // A viewer's own preset describes a share they are not sending, so `actual` used to stay
+    // null here forever and the control bar advertised "1080p 60" over someone else's picture.
+    // The honest number on this side is the one coming out of the decoder.
+    const inbound = samples.find((s) => s.peerId === store.state.share.sharerId && s.recvWidth);
+    store.setQuality({
+      actual: inbound
+        ? { width: inbound.recvWidth, height: inbound.recvHeight, fps: inbound.recvFps, inbound: true }
+        : null,
+    });
   }
 
   // The audio diagnostics ride on the same tick: one report to each peer, one timeline entry
@@ -708,6 +719,10 @@ function onWelcome(data) {
       stepDownSamplesCpu: data.stepDownSamplesCpu,
       stepDownSamplesBandwidth: data.stepDownSamplesBandwidth,
       adaptCooldownMs: data.adaptCooldownMs,
+      // Was missing from this list, so the server published it and the client never read it:
+      // `quality.js` fell back to its own 8000 and the ramp-up guard ran for half the
+      // configured time. The kind of omission nothing fails on -- it just adapts too early.
+      adaptWarmupMs: data.adaptWarmupMs,
     },
     bundlePolicy: data.bundlePolicy,
     iceTransportPolicy: data.iceTransportPolicy,
@@ -786,6 +801,9 @@ function applyJoinedIdentity(data) {
   view.enterRoom();
   view.renderAll();
   installIntrospection();
+  // Before the peer connections, so a remembered speaker is already in force when the first
+  // remote element is created rather than being retro-fitted onto it a moment later.
+  restoreAudioPrefs();
 
   void restoreLocalMedia();
 
@@ -899,6 +917,9 @@ function onPeerJoined(data) {
   store.addPeer(peer);
   mesh.addPeer(peer);
   void quality.apply(); // the per-peer budget depends on how many people are here
+  // Their id is new but they are not: a volume set for this name earlier in the session --
+  // before their reconnect, or before they last left -- applies again.
+  restoreVolumeFor(peer.id);
   toasts.info(UI.peerJoined(peer.name));
 }
 
@@ -908,6 +929,13 @@ function onPeerLeft(data) {
   stats.forget(data.id);
   view.removePeerMedia(data.id);
   store.removeSink(data.id);
+  // The id is dead; the preference is not. It lives on under their NAME in the session, so
+  // dropping it from the live map here is bookkeeping, not forgetting.
+  if (data.id in store.state.audio.volumes) {
+    const volumes = { ...store.state.audio.volumes };
+    delete volumes[data.id];
+    store.setAudio({ volumes });
+  }
   dumpAssemblers.delete(data.id);
   // Not left to the track's `ended` event: Chrome fires it when the connection closes but
   // Firefox historically does not, and a missed delete keeps a live MediaStreamTrack and its
@@ -1209,6 +1237,94 @@ bus.on(EVENTS.INTENT_TOGGLE_MIC_MENU, () => {
   if (open) void media?.refreshDevices('menu');
 });
 
+// -----------------------------------------------------------------------------
+// Playback: the speaker, and how loud each person is
+// -----------------------------------------------------------------------------
+
+/**
+ * Both of these are LOCAL. Nothing here reaches the wire, no peer is told they were turned
+ * down, and the protocol does not change -- which is why neither needed a message.
+ *
+ * They are remembered for the tab in `sessionStorage`, alongside the host token and under the
+ * same rules: per-tab, gone when the tab closes, never `localStorage`. Choosing your headphones
+ * again after every reload is the kind of small friction that makes people stop using a
+ * feature, and it is not worth a durable record on someone's disk to fix.
+ */
+const AUDIO_PREFS_KEY = 'streamer:audio';
+
+function readAudioPrefs() {
+  try {
+    const raw = sessionStorage.getItem(AUDIO_PREFS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    // Blocked storage, or something else wrote nonsense under this key. Defaults are fine.
+    return {};
+  }
+}
+
+function writeAudioPrefs(patch) {
+  try {
+    const next = { ...readAudioPrefs(), ...patch };
+    sessionStorage.setItem(AUDIO_PREFS_KEY, JSON.stringify(next));
+  } catch {
+    // Non-fatal: the choice still applies for this session, it just will not survive a reload.
+  }
+}
+
+/**
+ * Volumes are remembered by NAME, not by peer id.
+ *
+ * A peer id is per-connection: it changes on their reconnect and on ours. Keyed by id, "turn
+ * Ammar down" would silently lapse the moment his socket blinked -- which is precisely when
+ * somebody is most likely to be fiddling with volumes.
+ */
+function rememberVolume(peerId, gain) {
+  const name = store.peer(peerId)?.name;
+  if (!name) return;
+  const byName = { ...(readAudioPrefs().volumes ?? {}) };
+  if (gain === 1) delete byName[name];
+  else byName[name] = gain;
+  writeAudioPrefs({ volumes: byName });
+}
+
+/** Re-apply a remembered volume to someone who has just (re)joined. */
+function restoreVolumeFor(peerId) {
+  const name = store.peer(peerId)?.name;
+  const gain = name ? readAudioPrefs().volumes?.[name] : undefined;
+  if (!Number.isFinite(gain) || gain === 1) return;
+  applyPeerVolume(peerId, gain);
+}
+
+function applyPeerVolume(peerId, gain) {
+  const routed = view.setPeerVolume(peerId, gain);
+  store.setAudio({ volumes: { ...store.state.audio.volumes, [peerId]: gain } });
+  logger.info('audio: peer volume', { peerId, gain, via: routed ? 'webaudio' : 'element' });
+}
+
+bus.on(EVENTS.INTENT_SET_PEER_VOLUME, ({ peerId, gain }) => {
+  applyPeerVolume(peerId, gain);
+  rememberVolume(peerId, gain);
+});
+
+bus.on(EVENTS.INTENT_SET_SPEAKER_DEVICE, ({ deviceId }) => {
+  view.setOutputDevice(deviceId);
+  store.setAudio({ speakerDeviceId: deviceId || null });
+  writeAudioPrefs({ speakerDeviceId: deviceId || null });
+});
+
+/** Apply what this tab remembers. Called once the room is up and devices are known. */
+function restoreAudioPrefs() {
+  const prefs = readAudioPrefs();
+  store.setAudio({ speakerSupported: view.speakerSelectionSupported() });
+  if (prefs.speakerDeviceId && view.speakerSelectionSupported()) {
+    view.setOutputDevice(prefs.speakerDeviceId);
+    store.setAudio({ speakerDeviceId: prefs.speakerDeviceId });
+  }
+  for (const peer of store.peerList()) restoreVolumeFor(peer.id);
+}
+
 /**
  * Switch device or processing flags without renegotiating.
  *
@@ -1369,7 +1485,9 @@ bus.on(EVENTS.INTENT_TOGGLE_INCOMING_AUDIO_TEST, () => {
   store.setAudio({ incomingMutedForTest: on });
   view.setIncomingMuted(on);
   logger.info('audio: incoming test-mute', { on });
-  setBanner('incoming', on ? { kind: 'warn', message: biNode(BANNER.incomingMuted) } : null);
+  // `inline` like every other banner: the strip is one line tall, and a two-line bilingual
+  // block inside it is simply half-hidden.
+  setBanner('incoming', on ? { kind: 'warn', message: biNode(BANNER.incomingMuted, { inline: true }) } : null);
 });
 
 bus.on(EVENTS.INTENT_RESUME_AUDIO, () => {
@@ -1387,7 +1505,7 @@ bus.on(EVENTS.AUDIO_PLAYBACK_BLOCKED, ({ peerId, name }) => {
   const peer = store.peer(peerId);
   setBanner('playback', {
     kind: 'danger',
-    message: biNode(resolve(BANNER.playbackBlocked, { name: peer?.name ?? peerId })),
+    message: biNode(resolve(BANNER.playbackBlocked, { name: peer?.name ?? peerId }), { inline: true }),
     action: { label: bi(BANNER.enableAudio), onClick: () => bus.emit(EVENTS.INTENT_RESUME_AUDIO) },
   });
   logger.warn('audio: playback blocked', { peerId, name });
@@ -1461,16 +1579,51 @@ async function releaseMicTest() {
 const BANNER_PRIORITY = ['signaling', 'incoming', 'playback', 'health'];
 const banners = new Map();
 
+/**
+ * What the user has closed by hand, keyed `owner:dedupe`.
+ *
+ * The dismissal has to be remembered HERE rather than in the view, because the health loop
+ * calls `setBanner` again one second later with the same content: a close button whose effect
+ * lasts a second is worse than no close button. The key includes the dedupe token so a
+ * dismissal covers this condition only -- a different problem still gets to interrupt.
+ *
+ * Only specs that opt in with `dedupe` are dismissible. A dropped signaling connection is not:
+ * it is the reason nothing else on the page works, and a user who hides it is left with a room
+ * that has silently stopped being a room.
+ */
+const dismissedBanners = new Set();
+
+const bannerKey = (owner, spec) => (spec?.dedupe ? `${owner}:${spec.dedupe}` : null);
+
 function setBanner(owner, spec) {
   if (spec) banners.set(owner, spec);
   else banners.delete(owner);
-  const owners = BANNER_PRIORITY.filter((name) => banners.has(name));
-  if (owners.length === 0) {
+
+  const visible = BANNER_PRIORITY.filter((name) => {
+    if (!banners.has(name)) return false;
+    const key = bannerKey(name, banners.get(name));
+    return key === null || !dismissedBanners.has(key);
+  });
+  if (visible.length === 0) {
     view.hideBanner();
     return;
   }
-  const current = banners.get(owners[0]);
-  view.showBanner(current.kind, current.message, current.action);
+
+  const name = visible[0];
+  const current = banners.get(name);
+  const key = bannerKey(name, current);
+  view.showBanner(
+    current.kind,
+    current.message,
+    current.action,
+    key === null
+      ? null
+      : () => {
+          dismissedBanners.add(key);
+          logger.debug('ui: banner dismissed', { key });
+          setBanner(name, current);
+        },
+  );
 }
 
 const healthTracker = createHealthTracker();
@@ -1506,6 +1659,18 @@ function healthSnapshot() {
 }
 
 /**
+ * Verdicts that say nothing to interrupt for.
+ *
+ * `OK` and `HEARD` are good news. `CAPTURE_SILENT` is here because it was wrong too often to
+ * keep in the user's face: it rests on the level meter, the meter reads a CLONE of the
+ * microphone rather than the track that is actually sent, and a clone that fails on Windows
+ * looks exactly like a dead microphone from here. It still appears in the stats panel and in
+ * the Audio check -- the two places a person goes when they already suspect something -- but
+ * it no longer claims the stage on its own.
+ */
+const SILENT_VERDICTS = new Set([HEALTH.OK, HEALTH.HEARD, HEALTH.CAPTURE_SILENT]);
+
+/**
  * The verdict, re-derived once a second and shown only when it changes -- where "changes"
  * includes the device or peer it names: the same code raised again for a different device
  * (the built-in array was muted in Windows, the person picked a headset that is muted too)
@@ -1529,18 +1694,21 @@ function evaluateHealth() {
   const params = { ...verdict.params, errorLine: self.micError ? errorLine(self.micError) : '' };
   const hint = resolve(AUDIO_HINT[verdict.code], params);
   view.setMicHint(
-    verdict.code === HEALTH.OK ? null : biNode(hint, { inline: true }),
+    SILENT_VERDICTS.has(verdict.code) ? null : biNode(hint, { inline: true }),
     verdict.severity ?? null,
   );
 
-  if (verdict.code === HEALTH.OK || verdict.code === HEALTH.HEARD) {
+  if (SILENT_VERDICTS.has(verdict.code)) {
     setBanner('health', null);
     return;
   }
+  // The banner carries the SHORT copy -- one line, the same sentence the hint pill shows. The
+  // long explanation is behind the Audio check button rather than printed over the stage.
   setBanner('health', {
     kind: verdict.severity === 'ok' ? 'info' : verdict.severity,
-    message: biNode(resolve(AUDIO_HEALTH[verdict.code], params)),
+    message: biNode(hint, { inline: true }),
     action: { label: bi(AUDIO_CHECK.title), onClick: () => bus.emit(EVENTS.INTENT_AUDIO_CHECK) },
+    dedupe: `${verdict.code}:${verdict.params?.label ?? verdict.params?.name ?? ''}`,
   });
 }
 
@@ -2181,6 +2349,10 @@ function installIntrospection() {
     meterState: () => micMeter?.state?.() ?? null,
     devices: () => store.state.audio.devices,
     audioSinks: () => view.allSinkStates(),
+    speakerDevice: () => store.state.audio.speakerDeviceId,
+    peerVolumes: () => ({ ...store.state.audio.volumes }),
+    /** The Web Audio graph's own view: which peers it is actually carrying, and at what gain. */
+    mixer: () => view.mixerState(),
     transceivers: (peerId) => mesh?.transceivers(peerId ?? mesh.peerIds()[0]) ?? null,
     lobby: () => lobbyMicResult,
     health: () => store.state.audio.health,

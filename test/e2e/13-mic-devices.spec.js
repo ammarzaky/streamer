@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { createRoom, joinRoom, selfId, waitConnected, senders } from './helpers/app.js';
-import { LOBBY, AUDIO_HEALTH, AUDIO_HINT, resolve } from '../../public/js/ui/audio-strings.js';
+import { LOBBY, AUDIO_HINT, resolve } from '../../public/js/ui/audio-strings.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -461,10 +461,10 @@ test('in the room, a microphone Windows has muted is the hint above Mute, and un
   await expect
     .poll(() => page.evaluate(() => window.__app.health()?.code ?? null), { timeout: 5_000 })
     .toBe('SOURCE_MUTED');
-  await expect(page.getByTestId('room-banner')).toContainText(
-    resolve(AUDIO_HEALTH.SOURCE_MUTED, { label }).en,
-    { timeout: 5_000 },
-  );
+  // The banner carries the SHORT copy -- the same sentence as the hint. The long explanation
+  // lives behind its Audio check button rather than across the stage.
+  await expect(page.getByTestId('room-banner')).toContainText(hintCopy.en, { timeout: 5_000 });
+  await expect(page.getByTestId('room-banner-action')).toBeVisible();
 
   await releaseOsMute(page);
   await expect
@@ -532,9 +532,7 @@ test('a muted replacement microphone is named in the hint, not the device it rep
   await expect(hint).toContainText(secondHint.ar);
   await expect(hint).not.toContainText(first);
   const banner = page.getByTestId('room-banner');
-  await expect(banner).toContainText(resolve(AUDIO_HEALTH.SOURCE_MUTED, { label: second }).en, {
-    timeout: 5_000,
-  });
+  await expect(banner).toContainText(secondHint.en, { timeout: 5_000 });
   await expect(banner).not.toContainText(first);
 
   await ctx.close();

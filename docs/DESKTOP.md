@@ -86,6 +86,17 @@ speakers instead of excluding this app's output, and Chromium's `restrictOwnAudi
 apply to the Electron loopback path (the web client requests it only in a browser, where it is
 honoured when supported). Echo cancellation does not help either — see below.
 
+**The per-participant volume sliders sit on the wrong side of this.** They act on playback, and
+playback is exactly what the loopback captures — so turning someone up to 500% while sharing
+system audio sends their voice back to them five times louder. Turning them *down* has the same
+shape in reverse. If you are sharing system audio, either untick it or leave the volumes at
+100%; the sliders are for listening, not for what you send.
+
+**Choosing a speaker needs a permission.** `setSinkId` is gated behind Chromium's
+`speaker-selection` permission, which `desktop/main.js` grants for trusted origins alongside
+`media` and `display-capture`. Left out, the picker draws itself and does nothing: the promise
+rejects, and the only trace is a `permission` line in the desktop log.
+
 Muting your microphone does not silence what you are sharing. They are different tracks on
 different senders, and the mute control only ever touches the microphone. That separation is
 enforced by a test.

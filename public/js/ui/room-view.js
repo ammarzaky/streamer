@@ -17,6 +17,7 @@ import { fmtBitrate, fmtDuration, hueFromId, initials } from '../core/util.js';
 import { PRESETS } from '../../shared/quality-math.js';
 import { logger } from '../core/logger.js';
 import { RESERVED_DEVICE_IDS, friendlyDeviceLabel } from '../media/mic-constraints.js';
+import { createRemoteAudioMixer, clampGain, MAX_GAIN, UNITY_GAIN } from '../media/remote-audio.js';
 
 /** A peer report older than this no longer describes the present. */
 const REPORT_STALE_MS = 8000;
@@ -90,6 +91,29 @@ export function createRoomView({ store, bus, EVENTS }) {
   /** peerId -> the last play() outcome and element events, for diagnostics. */
   const sinkFacts = new Map();
 
+  /**
+   * The Web Audio path, for volumes the element cannot reach (`.volume` stops at 1) and for
+   * nothing else. It stays dormant until somebody actually moves a slider -- see
+   * `media/remote-audio.js` -- so an ordinary call has exactly the playback it always had.
+   */
+  let mixerOutput = null;
+  const mixer = createRemoteAudioMixer({
+    onOutput: (stream) => {
+      mixerOutput = h('audio', { autoplay: true, playsInline: true, dataset: { testid: 'mixer-output' } });
+      mixerOutput.muted = incomingMuted;
+      mixerOutput.srcObject = stream;
+      el.audioSinks.append(mixerOutput);
+      applySinkId(mixerOutput);
+      mixerOutput.play().catch((err) => {
+        logger.warn('audio: mixer output play rejected', { name: err?.name });
+        bus.emit(EVENTS.AUDIO_PLAYBACK_BLOCKED, { peerId: null, name: err?.name ?? 'play-rejected' });
+      });
+    },
+  });
+
+  /** The chosen output device, applied to every element present and future. */
+  let speakerDeviceId = null;
+
   let sessionTimer = null;
   /** The last level painted, so a mute flip can repaint the colour without a new sample. */
   let lastLevel = 0;
@@ -151,9 +175,19 @@ export function createRoomView({ store, bus, EVENTS }) {
    * the default for nothing.
    */
   function deviceOptions(devices) {
+    return listDevices(devices?.inputs);
+  }
+
+  /** The same list for the other direction. Windows names the reserved output ids exactly as it
+   *  names the input ones, so the labelling rules are shared rather than re-derived. */
+  function speakerOptions(devices) {
+    return listDevices(devices?.outputs);
+  }
+
+  function listDevices(entries) {
     const seen = new Set();
     const out = [];
-    for (const entry of devices?.inputs ?? []) {
+    for (const entry of entries ?? []) {
       if (!entry.deviceId || seen.has(entry.deviceId)) continue;
       seen.add(entry.deviceId);
       let label = friendlyDeviceLabel(entry) || entry.deviceId.slice(0, 8);
@@ -343,9 +377,11 @@ export function createRoomView({ store, bus, EVENTS }) {
       isHost: self.isHost,
       isSharing: share.sharerId !== null && share.sharerId === self.id,
       pcState: 'connected',
-      hear: audio.health?.code === 'CAPTURE_SILENT' || audio.health?.code === 'UNHEARD_TRANSPORT'
-        ? { pair: TILE.nobodyHears, tone: 'bad' }
-        : null,
+      // CAPTURE_SILENT deliberately absent: it rests on a clone of the microphone that can
+      // fail on its own, and "nobody hears you" on your own tile while the call is working is
+      // the same false alarm the banner used to raise. UNHEARD_TRANSPORT is a peer SAYING they
+      // cannot hear us, which is evidence of a different and better kind.
+      hear: audio.health?.code === 'UNHEARD_TRANSPORT' ? { pair: TILE.nobodyHears, tone: 'bad' } : null,
       deviceLabel: self.micDevice?.label ?? null,
     });
 
@@ -443,10 +479,25 @@ export function createRoomView({ store, bus, EVENTS }) {
   // ---------------------------------------------------------------------------
 
   function renderQuality() {
-    const { quality, ui } = store.state;
-    const current = PRESETS.find((p) => p.id === quality.presetId) ?? PRESETS.at(-1);
+    const { quality, ui, share } = store.state;
+    // No fallback to the top preset: an unknown id used to render "1080p 60", so a client that
+    // had not been told a preset asserted the highest one on the ladder.
+    const current = PRESETS.find((p) => p.id === quality.presetId) ?? null;
+    const actual = quality.actual;
 
-    text(el.qualityLabel, current.label);
+    // The preset is a LOCAL target for a LOCAL share, and it is never sent over the wire. On a
+    // viewer's screen it describes a stream they are not sending, so labelling their button
+    // with it is a claim about someone else's encoder that this side cannot make. While
+    // somebody else shares, the button shows what is arriving instead.
+    const watchingOther = share.sharerId !== null && share.sharerId !== store.state.self.id;
+    text(
+      el.qualityLabel,
+      watchingOther
+        ? actual
+          ? `${actual.height}p · ${Math.round(actual.fps)} fps`
+          : UI.qualityReceiving
+        : (current?.label ?? '—'),
+    );
     el.qualityToggle.setAttribute('aria-expanded', String(ui.qualityMenuOpen));
     show(el.qualityMenu, ui.qualityMenuOpen);
     if (!ui.qualityMenuOpen) return;
@@ -473,15 +524,28 @@ export function createRoomView({ store, bus, EVENTS }) {
     );
 
     // Target and actual sit together: the gap between what was asked for and what is being
-    // delivered is the most useful thing this panel can show.
-    const actual = quality.actual;
+    // delivered is the most useful thing this panel can show. `actual` is outbound for the
+    // sharer and inbound for everyone else, and it is labelled so nobody reads a number about
+    // their decoder as a number about their encoder.
     const footLines = [
-      `${UI.statsTarget}: ${current.width}x${current.height} @ ${current.frameRate}`,
+      current
+        ? `${UI.statsTarget}: ${current.width}x${current.height} @ ${current.frameRate}`
+        : `${UI.statsTarget}: —`,
       actual
-        ? `${UI.statsActual}: ${actual.width}x${actual.height} @ ${Math.round(actual.fps)}`
+        ? `${actual.inbound ? UI.statsReceiving : UI.statsActual}: ${actual.width}x${actual.height} @ ${Math.round(actual.fps)}`
         : `${UI.statsActual}: —`,
-      `${UI.statsLimitedBy}: ${limitedByLabel(quality.limitedBy)}`,
+      // `limitedBy` only ever describes the LOCAL encoder. On a viewer's screen that encoder is
+      // idle, so the honest answer is that we do not know -- printing "Nothing" there told
+      // people their poor picture was unconstrained when nothing here had measured it.
+      watchingOther
+        ? `${UI.statsLimitedBy}: —`
+        : `${UI.statsLimitedBy}: ${limitedByLabel(quality.limitedBy)}`,
     ];
+    // Only for the sharer, and only once measured: this is the answer to "why is my sharp
+    // screen sending two frames a second", which otherwise looks like a fault.
+    if (!watchingOther && quality.contentMode) {
+      footLines.push(`${UI.statsContent}: ${contentModeLabel(quality.contentMode)}`);
+    }
 
     replace(el.qualityMenu, [
       ...options,
@@ -504,6 +568,10 @@ export function createRoomView({ store, bus, EVENTS }) {
       default:
         return UI.limitedNone;
     }
+  }
+
+  function contentModeLabel(mode) {
+    return mode === 'still' ? UI.contentStill : UI.contentMoving;
   }
 
   // ---------------------------------------------------------------------------
@@ -531,6 +599,60 @@ export function createRoomView({ store, bus, EVENTS }) {
     return h('label', { class: 'mic-menu__check' }, [input, h('span', {}, [biNode(pair, { inline: true })])]);
   }
 
+  /**
+   * peerId -> the live `<input type="range">`, so a re-render can update its VALUE without
+   * replacing the node. Replacing a slider that is mid-drag cancels the drag, and the menu
+   * re-renders on any audio-slice change -- which a moving slider is.
+   */
+  const volumeInputs = new Map();
+
+  /** One participant's volume row: a slider and the percentage it is currently at. */
+  function volumeRow(peerId, name, gain) {
+    const readout = h('span', { class: 'mic-menu__volume-value', dataset: { testid: `peer-volume-value-${peerId}` } }, `${Math.round(gain * 100)}%`);
+    const input = h('input', {
+      type: 'range',
+      class: 'mic-menu__volume-slider',
+      min: '0',
+      // Percent rather than gain, so the step is a whole number and the keyboard arrows move
+      // by 5% instead of by an unrepresentable fraction.
+      max: String(MAX_GAIN * 100),
+      step: '5',
+      value: String(Math.round(gain * 100)),
+      dataset: { testid: `peer-volume-${peerId}` },
+      'aria-label': `${name}: ${UI.volumeLabel}`,
+      oninput: () => {
+        const next = Number(input.value) / 100;
+        readout.textContent = `${input.value}%`;
+        bus.emit(EVENTS.INTENT_SET_PEER_VOLUME, { peerId, gain: next });
+      },
+    });
+    volumeInputs.set(peerId, { input, readout });
+    return h('div', { class: 'mic-menu__volume', dataset: { testid: `peer-volume-row-${peerId}` } }, [
+      h('div', { class: 'mic-menu__volume-head' }, [
+        h('span', { class: 'mic-menu__volume-name' }, name),
+        readout,
+      ]),
+      input,
+    ]);
+  }
+
+  /**
+   * Push new values into sliders that already exist, instead of rebuilding them.
+   *
+   * Skipped for the one the user is holding: writing `.value` under an active drag makes the
+   * thumb jump back to wherever the last render thought it was.
+   */
+  function syncVolumeInputs() {
+    const { volumes } = store.state.audio;
+    for (const [peerId, { input, readout }] of volumeInputs) {
+      if (document.activeElement === input) continue;
+      const percent = String(Math.round(clampGain(volumes[peerId] ?? UNITY_GAIN) * 100));
+      if (input.value === percent) continue;
+      input.value = percent;
+      readout.textContent = `${percent}%`;
+    }
+  }
+
   /** What the open menu was last built from, so a stats tick does not rebuild it under a
    *  pointer that is mid-press. */
   let micMenuKey = null;
@@ -546,9 +668,18 @@ export function createRoomView({ store, bus, EVENTS }) {
 
     const currentId = self.micDevice?.settings?.deviceId ?? null;
     const options = deviceOptions(audio.devices);
+    const outputs = speakerOptions(audio.devices);
     const processing = audio.processing ?? self.micDevice?.settings ?? {};
+    const roster = store.peerList().map((p) => [p.id, p.name]);
+    // `displayAudioActive` rather than "am I sharing": the warning is about the SHARED AUDIO
+    // track carrying this machine's playback, and a screen share with the audio box unticked
+    // carries nothing to warn about.
+    const sharingSystemAudio = Boolean(self.sharing && self.displayAudioActive);
     const key = JSON.stringify([
+      sharingSystemAudio,
       options,
+      outputs,
+      audio.speakerDeviceId,
       currentId,
       self.micDevice?.label ?? null,
       processing.echoCancellation,
@@ -558,9 +689,16 @@ export function createRoomView({ store, bus, EVENTS }) {
       audio.selfTest?.verdict,
       audio.selfTest?.blobUrl,
       audio.incomingMutedForTest,
+      // WHO is in the room, never how loud they are: a volume in this key would rebuild the
+      // menu on the first pixel of every drag and take the slider out from under the pointer.
+      roster,
     ]);
-    if (key === micMenuKey) return;
+    if (key === micMenuKey) {
+      syncVolumeInputs();
+      return;
+    }
     micMenuKey = key;
+    volumeInputs.clear();
 
     const deviceButtons = options.map((o) => {
       const checked = currentId === o.deviceId;
@@ -593,6 +731,37 @@ export function createRoomView({ store, bus, EVENTS }) {
           ])
         : null,
       ...deviceButtons,
+
+      h('div', { class: 'mic-menu__section' }, [biNode(MIC_MENU.speaker, { inline: true })]),
+      ...(speakerSelectionSupported()
+        ? outputs.map((o) =>
+            menuButton({ en: o.label }, {
+              testid: `speaker-device-${o.deviceId.slice(0, 12)}`,
+              checked: (audio.speakerDeviceId ?? RESERVED_DEVICE_IDS.DEFAULT) === o.deviceId,
+              onclick: () => bus.emit(EVENTS.INTENT_SET_SPEAKER_DEVICE, { deviceId: o.deviceId }),
+            }),
+          )
+        : [h('div', { class: 'mic-menu__note', dataset: { testid: 'speaker-unsupported' } }, [
+            biNode(MIC_MENU.speakerUnsupported, { inline: true }),
+          ])]),
+
+      ...(roster.length
+        ? [
+            h('div', { class: 'mic-menu__section' }, [biNode(MIC_MENU.volumes, { inline: true })]),
+            ...roster.map(([peerId, name]) =>
+              volumeRow(peerId, name, clampGain(audio.volumes[peerId] ?? UNITY_GAIN)),
+            ),
+            h('div', { class: 'mic-menu__note' }, [biNode(MIC_MENU.volumeNote, { inline: true })]),
+            // Only when both are true, because only then does it matter: a system-audio share
+            // carries this machine's playback, so a boost is re-sent to the person boosted.
+            sharingSystemAudio
+              ? h('div', { class: 'mic-menu__note mic-menu__note--warn', dataset: { testid: 'volume-loopback-warning' } }, [
+                  biNode(MIC_MENU.volumeLoopbackWarning, { inline: true }),
+                ])
+              : null,
+          ]
+        : []),
+
       h('div', { class: 'mic-menu__section' }, [biNode(MIC_MENU.processing, { inline: true })]),
       ...checks,
       h('div', { class: 'mic-menu__note' }, [biNode(MIC_MENU.processingNote, { inline: true })]),
@@ -685,12 +854,14 @@ export function createRoomView({ store, bus, EVENTS }) {
           row(UI.statsTheirShare, inboundLabel(s?.audioIn?.shareAudio), 'stat-their-share'),
           row(UI.statsPlayback, playbackLabel(sink), 'stat-playback', sink?.playError ? 'danger' : null),
           row(UI.statsDirections, directionsLabel(s?.transceivers), 'stat-directions'),
+          // `!= null` rather than truthiness: a genuine zero is a measurement (nothing is
+          // arriving), and printing "—" for it hides the one reading that says so.
           row(
             UI.statsResolution,
-            s?.recvWidth ? `${s.recvWidth}x${s.recvHeight}` : '—',
+            s?.recvWidth != null ? `${s.recvWidth}x${s.recvHeight}` : '—',
             'stat-resolution',
           ),
-          row(UI.statsFrames, s?.recvFps ? `${Math.round(s.recvFps)} fps` : '—', 'stat-fps'),
+          row(UI.statsFrames, s?.recvFps != null ? `${Math.round(s.recvFps)} fps` : '—', 'stat-fps'),
           row(UI.statsDropped, s?.framesDropped != null ? String(s.framesDropped) : '—', 'stat-dropped'),
           row(UI.statsConnection, connectionLabel(conn), 'stat-connection-type'),
           row(UI.statsRoundTrip, s?.roundTripMs != null ? `${s.roundTripMs} ms` : '—', 'stat-rtt'),
@@ -874,6 +1045,13 @@ export function createRoomView({ store, bus, EVENTS }) {
     if (existing instanceof MediaStream) existing.addTrack(track);
     else audio.srcObject = new MediaStream([track]);
 
+    // Registered per TRACK, not per stream. A peer's microphone and their shared system audio
+    // land on this one element, and a MediaStreamAudioSourceNode reads only the stream's first
+    // audio track -- so a per-stream graph would drop the shared audio without a word.
+    mixer.attach(peerId, track);
+    if (mixer.isRouted(peerId)) audio.muted = true;
+    applySinkId(audio);
+
     for (const type of ['mute', 'unmute', 'ended']) {
       track.addEventListener(type, () => logger.info(`audio: remote track ${type}`, { peerId, kind: track.kind, id: track.id }));
     }
@@ -911,6 +1089,11 @@ export function createRoomView({ store, bus, EVENTS }) {
       muted: audio.muted,
       volume: audio.volume,
       sinkId: audio.sinkId ?? '',
+      /** The Web Audio gain, 0..5. Separate from `volume` because that one is capped at 1 by
+       *  the specification and would silently truncate anything a slider set above it. */
+      gain: mixer.gain(peerId),
+      /** 'element' | 'webaudio' -- which path this peer's sound is actually taking. */
+      outputVia: mixer.isRouted(peerId) ? 'webaudio' : 'element',
       currentTime: Math.round(audio.currentTime * 10) / 10,
       playError: f.playError,
       lastEvent: f.lastEvent,
@@ -929,11 +1112,74 @@ export function createRoomView({ store, bus, EVENTS }) {
   /** Try every element again, inside a user gesture. */
   function resumeAllAudio() {
     for (const [peerId, audio] of audioElements) playSink(peerId, audio);
+    // The graph has its own autoplay gate: a suspended AudioContext is silence that looks
+    // exactly like a working one, so the same click has to reach it too.
+    void mixer.resume();
+    if (mixerOutput) mixerOutput.play().catch(() => {});
   }
 
   function setIncomingMuted(flag) {
     incomingMuted = Boolean(flag);
     for (const audio of audioElements.values()) audio.muted = incomingMuted;
+    // The mixer's output is a sink too. Missing it would leave a boosted peer audible with
+    // "mute incoming audio" ticked, which is exactly the confusion that switch exists to rule
+    // out.
+    if (mixerOutput) mixerOutput.muted = incomingMuted;
+  }
+
+  /**
+   * Whether this browser can send audio to a chosen speaker at all.
+   *
+   * Chromium and Edge can; Firefox needs a flag and Safari has no implementation. Asked once
+   * rather than assumed, because a picker that silently does nothing is worse than no picker.
+   */
+  function speakerSelectionSupported() {
+    return typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype;
+  }
+
+  function applySinkId(audio) {
+    if (!audio?.setSinkId || speakerDeviceId === null) return;
+    audio.setSinkId(speakerDeviceId).catch((err) => {
+      // A device that has been unplugged since the menu was drawn, or a permission refusal.
+      // Reported rather than swallowed: "I picked my headphones and nothing moved" has to be
+      // answerable from the log.
+      logger.warn('audio: setSinkId failed', { name: err?.name, deviceId: speakerDeviceId });
+    });
+  }
+
+  /**
+   * Route every remote element -- and the mixer's output -- to one speaker.
+   *
+   * Applied to elements rather than to the AudioContext: `HTMLMediaElement.setSinkId` has been
+   * in Chromium since 49 and works on both paths, while `AudioContext.setSinkId` arrived in 110
+   * and would only cover the boosted one.
+   */
+  function setOutputDevice(deviceId) {
+    speakerDeviceId = deviceId || null;
+    for (const audio of audioElements.values()) applySinkId(audio);
+    if (mixerOutput) applySinkId(mixerOutput);
+    logger.info('audio: output device set', { deviceId: speakerDeviceId });
+  }
+
+  /**
+   * Set one participant's playback volume, 0..5.
+   *
+   * Above 1 the element cannot help -- `HTMLMediaElement.volume` is clamped by the
+   * specification -- so the peer moves onto the Web Audio path and their own element is muted
+   * so nobody is heard twice. Below 1 they move too, deliberately: one adjusted peer should
+   * behave identically whichever side of 100% the slider is on.
+   */
+  function setPeerVolume(peerId, value) {
+    const gain = clampGain(value);
+    const routed = mixer.setGain(peerId, gain);
+    const audio = audioElements.get(peerId);
+    if (audio) {
+      audio.muted = incomingMuted || routed;
+      // Left at 1 rather than tracking the gain: while routed the element is silent anyway, and
+      // if the graph could not be built (no AudioContext) this is the only volume there is.
+      audio.volume = routed ? 1 : Math.min(gain, 1);
+    }
+    return routed;
   }
 
   function removePeerMedia(peerId) {
@@ -944,6 +1190,7 @@ export function createRoomView({ store, bus, EVENTS }) {
       audioElements.delete(peerId);
     }
     sinkFacts.delete(peerId);
+    mixer.detach(peerId);
   }
 
   /** Drop every remote audio element. Needed after our own reconnect, where the peers keep
@@ -957,8 +1204,17 @@ export function createRoomView({ store, bus, EVENTS }) {
   // Banners
   // ---------------------------------------------------------------------------
 
-  /** `message` may be a string or a Node (a bilingual pair rendered with biNode). */
-  function showBanner(kind, message, action) {
+  /**
+   * `message` may be a string or a Node (a bilingual pair rendered with biNode).
+   *
+   * One line, always. The long form of a verdict lives behind `action` -- the Audio check
+   * wizard -- because a banner that grows with its copy is a banner that eats the stage.
+   *
+   * `onDismiss` adds a close button. The composition root has to remember the dismissal: this
+   * function is called again on the next health tick, one second later, and would otherwise
+   * put back what the user just closed.
+   */
+  function showBanner(kind, message, action, onDismiss) {
     show(el.roomBanner, true);
     el.roomBanner.className = `banner banner--${kind}`;
     replace(el.roomBanner, [
@@ -966,6 +1222,16 @@ export function createRoomView({ store, bus, EVENTS }) {
         ? h('span', { class: 'banner__text', dataset: { testid: 'room-banner' } }, [message])
         : h('span', { class: 'banner__text', dataset: { testid: 'room-banner' } }, message),
       action ? h('button', { class: 'btn btn--sm btn--secondary', dataset: { testid: 'room-banner-action' }, onclick: action.onClick }, action.label) : null,
+      onDismiss
+        ? h('button', {
+            class: 'banner__close',
+            type: 'button',
+            title: UI.dismiss,
+            'aria-label': UI.dismiss,
+            dataset: { testid: 'room-banner-dismiss' },
+            onclick: onDismiss,
+          }, '×')
+        : null,
     ]);
   }
 
@@ -1073,7 +1339,14 @@ export function createRoomView({ store, bus, EVENTS }) {
   /** The one-line verdict above the mic button. Null hides it. */
   function setMicHint(message, severity = null) {
     if (!message) {
+      // Cleared, not just hidden. A hidden element that still reads `data-severity="warn"` and
+      // still carries the old sentence is a stale assertion that anything reading the DOM --
+      // a test, a screen reader, the next render -- will believe. It surfaced when the "you
+      // are muted" warning stopped being replaced by an all-clear and simply went quiet.
       show(el.micHint, false);
+      text(el.micHint, '');
+      el.micHint.className = 'ctl__hint';
+      el.micHint.dataset.severity = '';
       return;
     }
     if (message instanceof Node) replace(el.micHint, [message]);
@@ -1151,6 +1424,12 @@ export function createRoomView({ store, bus, EVENTS }) {
     clearTimeout(overlayIdleTimer);
     clearInterval(sessionTimer);
     for (const [peerId] of audioElements) removePeerMedia(peerId);
+    mixer.stop();
+    if (mixerOutput) {
+      mixerOutput.srcObject = null;
+      mixerOutput.remove();
+      mixerOutput = null;
+    }
     setMicHint(null);
   }
 
@@ -1174,6 +1453,10 @@ export function createRoomView({ store, bus, EVENTS }) {
     allSinkStates,
     resumeAllAudio,
     setIncomingMuted,
+    setOutputDevice,
+    setPeerVolume,
+    speakerSelectionSupported,
+    mixerState: () => mixer.state(),
     setLobbyMicLevel,
     setLobbyMicStatus,
     setStageMicLevel,

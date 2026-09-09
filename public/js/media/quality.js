@@ -20,6 +20,10 @@ import {
   stepUp,
   presetIndex,
   PRESETS,
+  DEFAULT_PRESET_ID,
+  createContentTracker,
+  trackContentMode,
+  encoderSettingsFor,
   effectiveCapBps,
   scaleResolutionDownBy,
   isBandwidthGenuinelyShort,
@@ -36,7 +40,9 @@ export const LIMITED_BY = Object.freeze({
 export function createQualityController({ config, mesh, onChange, onSuggestRaise }) {
   const media = config?.media ?? {};
 
-  let presetId = media.defaultPreset ?? '1080p60';
+  // The constant, not a second copy of the literal: this fallback drifting from the exported
+  // one is the same class of bug as it drifting from config.default.json.
+  let presetId = media.defaultPreset ?? DEFAULT_PRESET_ID;
   let uploadBudgetBps = (media.uploadBudgetKbps ?? 20000) * 1000;
   const autoAdapt = media.autoAdapt !== false;
 
@@ -46,6 +52,11 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
 
   /** The outgoing video track, kept so the content hint can follow a preset change. */
   let localVideoTrack = null;
+
+  /** 'still' | 'moving' | null, decided from the capture's own frame rate. Null means "not yet
+   *  measured", where the preset's own settings stand. */
+  let contentMode = null;
+  const contentTracker = createContentTracker();
 
   /** When the current video track started, so adaptation can ignore the ramp-up transient. */
   let videoStartedAt = null;
@@ -110,7 +121,11 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
 
     // Top level, not inside the encoding. Chrome honours it, Firefox ignores it, Safari is
     // partial -- putting it in the wrong place fails silently everywhere.
-    params.degradationPreference = p.degradationPreference;
+    //
+    // Read through `encoderSettingsFor` rather than off the preset, so that a capture measured
+    // to be a still picture gets the setting that suits it. The two levers move together; see
+    // `applyContentHint`.
+    params.degradationPreference = encoderSettingsFor(p, contentMode).degradationPreference;
 
     try {
       await sender.setParameters(params);
@@ -161,12 +176,14 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
       preset: presetId,
       capBps: cap,
       meshLimited: limited,
+      contentMode,
       senders: senders.length,
     });
 
     onChange?.({
       presetId,
       effectiveCapBps: cap,
+      contentMode,
       limitedBy: limited ? LIMITED_BY.MESH_BUDGET : LIMITED_BY.NONE,
     });
   }
@@ -216,12 +233,48 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
    * trade per-frame sharpness for frame rate, which is what the 60fps presets are chosen for,
    * while 'detail' does the reverse for text. Setting the preference without the hint gets
    * half the intended behaviour.
+   *
+   * The preset supplies the default answer; a measured capture overrides it. Someone sharing a
+   * code editor and someone sharing a film are asking the encoder for opposite things, and
+   * neither of them knows there is a menu.
    */
   function applyContentHint(track) {
     if (!track || track.kind !== 'video') return;
     if (!('contentHint' in track)) return; // Firefox until recently
-    track.contentHint = preset().contentHint;
-    logger.debug('quality: content hint', { hint: track.contentHint });
+    const hint = encoderSettingsFor(preset(), contentMode).contentHint;
+    if (track.contentHint === hint) return;
+    track.contentHint = hint;
+    logger.debug('quality: content hint', { hint, contentMode });
+  }
+
+  /**
+   * Watch what the CAPTURE is doing and re-tune the encoder when the answer changes.
+   *
+   * Separate from `observe`'s step-down logic on purpose: that one asks "is this link or this
+   * machine struggling?" and responds by lowering the preset. This one asks "what kind of
+   * picture is this?" and responds by changing how the same preset is encoded. Conflating them
+   * would mean a still screen looked like a problem to be solved by sending less.
+   */
+  function observeContent(samples) {
+    // The same warm-up the step-down logic respects, for the same reason. A capture's first
+    // seconds report a frame rate that describes the start-up, not the content: measured, a
+    // 60fps canvas read 0 then 5 fps immediately after its track was created, which is exactly
+    // what a document looks like. Reading the ramp as an answer is the mistake `adaptWarmupMs`
+    // was introduced to prevent, and this rule was originally written outside it.
+    if (videoStartedAt === null || performance.now() - videoStartedAt < warmupMs) return;
+
+    // A struggling machine also produces few source frames -- the capturer is starved rather
+    // than idle -- and answering that with "spend the bitrate on sharpness" makes it worse.
+    // When the encoder says CPU, the content question is not the one being asked.
+    if (samples.some((s) => s.qualityLimitationReason === 'cpu')) return;
+
+    const reading = samples.map((s) => s.sourceFps).find((fps) => Number.isFinite(fps));
+    const before = contentMode;
+    contentMode = trackContentMode(contentTracker, reading ?? null);
+    if (contentMode === before) return;
+    logger.info('quality: content mode', { contentMode, sourceFps: reading ?? null, presetId });
+    applyContentHint(localVideoTrack);
+    void apply();
   }
 
   function setUploadBudgetKbps(kbps) {
@@ -250,7 +303,15 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
    * collapses is worse than staying put.
    */
   function observe(samples) {
-    if (!autoAdapt || samples.length === 0) return;
+    if (samples.length === 0) return;
+
+    // Outside the `autoAdapt` switch and the cooldown: this is not a downgrade, it is the
+    // encoder being told what it is looking at, and someone who has turned automatic quality
+    // changes off has not asked for a still screen to be encoded as if it were a film. It has
+    // its own gates -- see `observeContent`.
+    observeContent(samples);
+
+    if (!autoAdapt) return;
     if (performance.now() - lastChangeAt < cooldownMs) return;
 
     // Ignore everything while the encoder is still ramping up.
@@ -344,6 +405,13 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
   /** Called whenever the outgoing video track changes, including when it is cleared. */
   function setLocalVideoTrack(track) {
     localVideoTrack = track ?? null;
+    // A new capture is a new question. Carrying "that was a still picture" from the window that
+    // was just stopped into a film that was just started is worse than having no answer at all,
+    // so the measurement restarts with the track.
+    contentMode = null;
+    contentTracker.mode = null;
+    contentTracker.stillRun = 0;
+    contentTracker.movingRun = 0;
     applyContentHint(localVideoTrack);
     // A new track means a new ramp-up, so the warm-up window restarts with it.
     videoStartedAt = track ? performance.now() : null;
@@ -372,6 +440,11 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
     },
     get captureHeight() {
       return captureHeight;
+    },
+    /** 'still' | 'moving' | null. Read by the diagnostics dump and the stats panel: "why is my
+     *  sharp screen only sending 2 fps" has an answer now. */
+    get contentMode() {
+      return contentMode;
     },
   };
 }

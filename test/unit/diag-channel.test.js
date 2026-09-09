@@ -29,7 +29,15 @@ const fullInput = () => ({
     mic: { level: 0.1, rms: 0.2, packetsPerSec: 49, concealedPerSec: 1, trackMuted: false },
     shareAudio: { level: 0.3, rms: 0.4, packetsPerSec: 48, concealedPerSec: 0, trackMuted: true },
   },
-  sink: { paused: false, readyState: 4, muted: false, volume: 0.9, playError: 'NotAllowedError' },
+  sink: {
+    paused: false,
+    readyState: 4,
+    muted: false,
+    volume: 0.9,
+    gain: 2.5,
+    outputVia: 'webaudio',
+    playError: 'NotAllowedError',
+  },
   incomingMutedForTest: true,
 });
 
@@ -103,7 +111,7 @@ test('parseReport clamps unit values into [0,1] and nulls non-finite ones', () =
     kind: DIAG_KIND.REPORT,
     self: { micRms: 5, micLevel: -3 },
     hearing: { mic: { level: 1.5, rms: -0.5 }, shareAudio: { level: 'x', rms: null } },
-    sink: { volume: 99 },
+    sink: { volume: 99, gain: 99 },
   });
   const r = parseReport(frame);
   assert.equal(r.self.micRms, 1);
@@ -113,6 +121,23 @@ test('parseReport clamps unit values into [0,1] and nulls non-finite ones', () =
   assert.equal(r.hearing.shareAudio.level, null);
   assert.equal(r.hearing.shareAudio.rms, null);
   assert.equal(r.sink.volume, 1);
+  // Its own ceiling: the element's volume stops at 1 by specification, the playback gain does
+  // not, and folding the second into the first would report the same number for "as they sent
+  // it" and "five times louder".
+  assert.equal(r.sink.gain, 5);
+});
+
+test('the playback gain travels at full range and says which path it took', () => {
+  const boosted = parseReport(
+    buildReport({ t: 1, sink: { volume: 1, gain: 3.5, outputVia: 'webaudio' } }),
+  );
+  assert.equal(boosted.sink.gain, 3.5);
+  assert.equal(boosted.sink.outputVia, 'webaudio');
+
+  // An unadjusted peer: no graph, and the default path named explicitly rather than left blank.
+  const plain = parseReport(buildReport({ t: 1, sink: { volume: 1 } }));
+  assert.equal(plain.sink.gain, null, 'absent means not measured, not zero');
+  assert.equal(plain.sink.outputVia, 'element');
 });
 
 test('parseReport nulls numbers that arrive as strings or are missing', () => {

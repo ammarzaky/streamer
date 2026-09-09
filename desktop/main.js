@@ -987,7 +987,16 @@ app.whenReady().then(() => {
     // leaving it out silently denied every attempt -- the button, the double-click and F all did
     // nothing, with no error anywhere. The browser E2E never caught it because a plain browser
     // has no Electron permission handler to deny it.
-    const allowed = ['media', 'display-capture', 'clipboard-sanitized-write', 'fullscreen'];
+    // 'speaker-selection' belongs here for the same reason 'fullscreen' does: Chromium treats
+    // choosing an output device as a permission, and an omission here is not an error the page
+    // can see -- setSinkId simply rejects and the speaker picker does nothing.
+    const allowed = [
+      'media',
+      'display-capture',
+      'clipboard-sanitized-write',
+      'fullscreen',
+      'speaker-selection',
+    ];
     const trusted = isLocalPage(url) || (target && sameOrigin(url, target.origin));
     const granted = Boolean(trusted) && allowed.includes(permission);
     // Every decision is logged, because a denied 'media' request is indistinguishable from a

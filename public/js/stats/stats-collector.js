@@ -23,6 +23,11 @@ const SMOOTHING = 0.3;
  *  scale as the level meter (0..1 RMS); room tone with noise suppression sits at ~0.002. */
 export const MIC_SPEECH_RMS = 0.01;
 
+/** How long "speech detected" survives after the last interval that carried any. Sized to a
+ *  listening turn, not to a breath: a person who has said nothing for ten seconds is quiet,
+ *  a person who paused for three is in a conversation. */
+export const SPEECH_HOLD_SEC = 10;
+
 const finite = (value) => (Number.isFinite(value) ? value : null);
 
 /** Interval RMS from two cumulative energy/duration readings. Null when it cannot be known. */
@@ -100,15 +105,33 @@ export function deriveAudio(values, { micTrackId = null, roleByMid = {}, prev = 
 
   const micLevel = finite(micSource?.audioLevel);
   const micRms = prev ? intervalRms(cumulative.micEnergy, cumulative.micDuration, prev.micEnergy, prev.micDuration) : null;
+  // Interval RMS is the honest measure; the instantaneous level is the fallback when a
+  // browser reports one but not the other. Null means "cannot tell", not "silent".
+  const micSpeechNow =
+    micRms !== null ? micRms > MIC_SPEECH_RMS : micLevel !== null ? micLevel > MIC_SPEECH_RMS : null;
+
+  // Held, because the raw reading is a single un-smoothed one-second window and every ordinary
+  // pause in a conversation empties it. Reporting "SILENT (mic open, no sound)" while somebody
+  // listens to the person they are talking to is not a measurement, it is a false accusation.
+  // Time is accumulated from `dt` rather than a clock so the function stays pure.
+  //
+  // With no previous sample the counter starts AT the hold, not at zero: never having heard
+  // speech is not the same as having just heard some, and starting at zero would have the very
+  // first reading claim speech nobody made.
+  const prevQuiet = Number.isFinite(prev?.micQuietSec) ? prev.micQuietSec : SPEECH_HOLD_SEC;
+  const quietFor =
+    micSpeechNow === true ? 0 : micSpeechNow === false ? prevQuiet + (dt ?? 0) : prevQuiet;
+  cumulative.micQuietSec = quietFor;
+
   const mic = {
     hasSender: Boolean(micOutbound),
     level: micLevel,
     rms: micRms,
     energyPerSec: prev ? perSec(cumulative.micEnergy, prev.micEnergy) : null,
     packetsPerSec: prev ? perSec(cumulative.micPackets, prev.micPackets) : null,
-    // Interval RMS is the honest measure; the instantaneous level is the fallback when a
-    // browser reports one but not the other. Null means "cannot tell", not "silent".
-    speech: micRms !== null ? micRms > MIC_SPEECH_RMS : micLevel !== null ? micLevel > MIC_SPEECH_RMS : null,
+    speech: micSpeechNow === null ? null : micSpeechNow || quietFor < SPEECH_HOLD_SEC,
+    /** Seconds since the last interval that carried speech. The panel's raw number. */
+    quietSec: quietFor,
   };
 
   const audioIn = {};
@@ -238,6 +261,8 @@ export function createStatsCollector({ mesh, config, onSample }) {
     let candidatePair = null;
     let transport = null;
     let remoteInbound = null;
+    /** The CAPTURE's own rate, before the encoder has an opinion about it. */
+    let videoSource = null;
 
     const candidates = new Map();
     const values = [...report.values()];
@@ -246,6 +271,9 @@ export function createStatsCollector({ mesh, config, onSample }) {
       switch (stat.type) {
         case 'outbound-rtp':
           if (stat.kind === 'video') outboundVideo = stat;
+          break;
+        case 'media-source':
+          if (stat.kind === 'video') videoSource = stat;
           break;
         case 'inbound-rtp':
           if (stat.kind === 'video') inboundVideo = stat;
@@ -370,6 +398,14 @@ export function createStatsCollector({ mesh, config, onSample }) {
       // sending 1080p60?"
       sendWidth: outboundVideo?.frameWidth ?? null,
       sendHeight: outboundVideo?.frameHeight ?? null,
+
+      // The CAPTURE's own frame rate, from `media-source` rather than `outbound-rtp`. The
+      // distinction is the whole reason this field exists: a desktop capturer only emits frames
+      // that CHANGED, so this says whether the shared surface is animating -- while `sendFps`
+      // says what the encoder chose to do about it. Deciding "is this content still?" from
+      // `sendFps` would be circular, because telling the encoder the content is still is
+      // exactly what makes `sendFps` fall.
+      sourceFps: Number.isFinite(videoSource?.framesPerSecond) ? videoSource.framesPerSecond : null,
       recvWidth: inboundVideo?.frameWidth ?? null,
       recvHeight: inboundVideo?.frameHeight ?? null,
 

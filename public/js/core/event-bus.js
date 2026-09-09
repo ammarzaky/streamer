@@ -89,6 +89,11 @@ export const EVENTS = Object.freeze({
   INTENT_RELEASE_MIC_TEST: 'intent:release-mic-test',
   INTENT_REQUEST_PEER_DIAGNOSTICS: 'intent:request-peer-diagnostics',
 
+  // Playback: which speaker, and how loud each person is. Both are purely local -- nothing
+  // here reaches the wire, and nobody else can tell you turned them down.
+  INTENT_SET_SPEAKER_DEVICE: 'intent:set-speaker-device',
+  INTENT_SET_PEER_VOLUME: 'intent:set-peer-volume',
+
   // Facts, emitted by the engine.
   SIGNALING_STATUS: 'signaling:status',
   ROOM_STATE: 'room:state',

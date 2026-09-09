@@ -119,6 +119,21 @@ export const MIC_MENU = {
   current: ({ label }) => ({ ar: `المستخدم حالياً: ${label}`, en: `In use: ${label}` }),
   systemDefault: { ar: 'الافتراضي في النظام', en: 'System default' },
   communications: { ar: 'جهاز الاتصالات الافتراضي', en: 'Default communications device' },
+  speaker: { ar: 'السماعة', en: 'Speaker' },
+  speakerUnsupported: {
+    ar: 'المتصفح ده مبيسمحش باختيار السماعة — غيّرها من إعدادات الصوت في الويندوز.',
+    en: 'This browser cannot choose a speaker — change it in the system sound settings.',
+  },
+  volumes: { ar: 'صوت كل مشارك', en: 'Volume per participant' },
+  volumeNote: {
+    ar: 'ده عندك إنت بس — محدش بيعرف إنك علّيت صوته أو وطّيته. فوق 100% فيه حماية تلقائية من التكسير.',
+    en: 'Local to you — nobody is told you turned them up or down. Above 100% a limiter keeps it from clipping.',
+  },
+  /** Shown only while sharing system audio, where playback is inside the shared track. */
+  volumeLoopbackWarning: {
+    ar: 'إنت بتشارك صوت النظام: الصوت اللي بتسمعه بيترجعلهم جوا المشاركة، فالتعلية هترجعلهم أعلى.',
+    en: 'You are sharing system audio: what you hear is inside the shared track, so a boost goes back to them louder.',
+  },
   processing: { ar: 'معالجة الصوت', en: 'Audio processing' },
   aec: { ar: 'إلغاء الصدى (AEC)', en: 'Echo cancellation (AEC)' },
   ns: { ar: 'تقليل الضوضاء', en: 'Noise suppression' },

@@ -74,6 +74,11 @@ otherwise.
   room, a level bar that is always visible (inside the Mute button and on your own tile, and it
   keeps moving while you are muted), and an **Audio check** with a plain verdict — "they can
   hear you", "mic open but silent", "playback blocked" — plus a one-click diagnostics dump.
+- **Pick your speaker, and set each person's volume from 0 to 500%** — from the caret next to
+  Mute, without leaving the room. The boost is real rather than a relabelled slider: above 100%
+  the audio leaves the `<audio>` element, which the specification caps at 1, and goes through a
+  gain stage with a limiter so that loud does not become distorted. It is entirely local; the
+  person you turned up is never told.
 - **See who is in the room**, who is muted, who is sharing, and whether each connection is
   healthy.
 - **A stats panel** showing bitrate, frame rate, resolution, connection type, and — the useful
@@ -93,16 +98,31 @@ network or the CPU cannot keep up. You can also pick a preset manually:
 | 720p 30 | 1.2 Mbps | Reading text, screenshares of documents |
 | 720p 60 | 3 Mbps | A balance |
 | 1080p 30 | 3.5 Mbps | Sharp text at full size |
-| **1080p 60** | **6 Mbps** | **Default** — video, games, anything moving |
+| **1080p 60** | **6 Mbps** | **Default** — the ceiling; how it is spent is decided below |
 
-**Treat 1080p60 as a target, not a promise.** Asking for a resolution and frame rate is a
+**The preset is a ceiling, not a style.** A shared screen is two different problems wearing one
+name. A code editor or a document is a *still* picture: a desktop capturer only emits frames
+that changed, so it produces one to three frames per second whatever you pick — and telling the
+encoder to protect the frame rate then spends the whole bitrate on frames nobody is producing,
+paid for in the sharpness you can actually see. Video or a game is the opposite.
+
+So the app does not make you choose. It watches the *capture's* own frame rate — not the
+encoder's, which would be circular — and switches the encoder between "sharpness first" and
+"frame rate first" on its own, with hysteresis so a moment of scrolling does not flip it. The
+quality menu shows which one is in force under **Content**.
+
+**Treat any preset as a target, not a promise.** Asking for a resolution and frame rate is a
 request to your operating system and then to the encoder; neither guarantees the result. The
 app shows you the target and what is *actually* being delivered side by side, along with the
 reason for any gap:
 
 ```
-Target  1080p60      Actual  1920×1080 @ 54 fps      Limited by  Upload speed
+Target  1920x1080 @ 60   Actual  1920×1080 @ 2   Limited by  Nothing   Content  Still picture
 ```
+
+While someone *else* is sharing, that button shows what you are **receiving** instead. Your own
+preset describes a stream you are not sending, and it is never transmitted — so it can say
+nothing about the picture on your screen.
 
 ### The one number worth correcting
 
@@ -148,12 +168,19 @@ nothing survives a restart.
 **What the server never sees:** your screen, your microphone, or any audio or video at all.
 That traffic goes browser-to-browser.
 
-**What the app stores in your browser:** one item — a host token in `sessionStorage`, so that
-if you are the host and you reload the page, you get your role back instead of handing it to
-someone else. It is per-tab, disappears when you close the tab, and is deleted when you leave.
+**What the app stores in your browser:** at most two items, both in `sessionStorage`, both
+per-tab, both gone when you close the tab.
+
+1. A **host token**, so that if you are the host and you reload the page, you get your role
+   back instead of handing it to someone else. Deleted when you leave.
+2. Your **audio preferences** — which speaker you picked and how loud you set each
+   participant — written only if you actually change one of them. Volumes are keyed by
+   participant name so a reconnect does not lose them. Nothing here is sent anywhere: the
+   people you turned up or down are never told.
+
 No cookies, no `localStorage`, no IndexedDB, no cache. There is an automated test asserting
-exactly that, and it fails if anything else appears. The audio diagnostics add nothing to
-this: the level meter, device list and verdicts live in page memory only.
+exactly that, and it fails if a third key appears. The audio diagnostics add nothing to this:
+the level meter, device list and verdicts live in page memory only.
 
 **What the audio diagnostics expose:** read-only accessors on `window.__app` (`audio()`,
 `micSettings()`, `micLevel()`, `devices()`, `diagnostics()`, …) are always installed, so a

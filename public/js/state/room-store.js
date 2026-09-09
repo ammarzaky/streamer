@@ -71,7 +71,10 @@ export function createStore() {
       presetId: null,
       effectiveCapBps: null,
       limitedBy: null, // null | cpu | bandwidth | mesh-budget
-      actual: null, // { width, height, fps } measured from getStats
+      /** What the CAPTURE is doing: null (not measured yet) | 'still' | 'moving'. Decides how
+       *  the preset's bits are spent -- sharpness or frame rate. */
+      contentMode: null,
+      actual: null, // { width, height, fps, inbound? } measured from getStats
     },
 
     ui: {
@@ -96,6 +99,13 @@ export function createStore() {
       selfTest: { state: 'idle' },
       /** peerId -> the <audio> element's state for that peer. */
       sinks: {},
+      /** The chosen output device id, or null for "whatever the browser calls default". */
+      speakerDeviceId: null,
+      /** Whether this browser can route audio to a chosen speaker at all (Firefox cannot
+       *  without a flag). Null until asked; the picker hides itself when false. */
+      speakerSupported: null,
+      /** peerId -> playback gain, 0..5 where 1 is "as they sent it". */
+      volumes: {},
       /** "Mute incoming audio (test)": true means you cannot hear anyone, on purpose. */
       incomingMutedForTest: false,
       /** The processing flags in force, from track.getSettings() after acquisition. */

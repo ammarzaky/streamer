@@ -493,12 +493,18 @@
    signaling connection is a banner because it stays true until it is fixed.
 */
 
+/* A banner is a strip, not a panel. The height cap is a belt against copy that grows later:
+   the row it lives in is `auto`, so without one a long verdict would push the stage down by
+   however many lines it happened to wrap to. */
 .banner {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-2) var(--space-4);
   font-size: var(--text-sm);
+  line-height: 1.4;
+  max-height: 3rem;
+  overflow: hidden;
   border-bottom: 1px solid transparent;
 }
 
@@ -520,6 +526,29 @@
 
 .banner__text {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Inherits the severity colour rather than setting its own, so one rule covers all three
+   kinds. Sized to the text, not to a touch target: the banner is already only 3rem tall. */
+.banner__close {
+  flex: none;
+  padding: 2px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  opacity: 0.7;
+  font-size: var(--text-base);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.banner__close:hover {
+  opacity: 1;
 }
 
 /* ===========================================================================
@@ -924,10 +953,95 @@
   text-align: left;
 }
 
+/* ---- Per-participant volume ----------------------------------------------
+   The only range input in the app. Styled explicitly rather than left native because the
+   native track is invisible against the menu's surface in the dark theme, and because the
+   thumb has to stay big enough to drag on a laptop trackpad. */
+
+.mic-menu__volume {
+  padding: var(--space-1) var(--space-3) var(--space-2);
+}
+
+.mic-menu__volume-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.mic-menu__volume-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mic-menu__volume-value {
+  flex: none;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.mic-menu__volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 18px;
+  margin: 2px 0 0;
+  background: none;
+  cursor: pointer;
+}
+
+.mic-menu__volume-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-2);
+}
+
+.mic-menu__volume-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-2);
+}
+
+.mic-menu__volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.mic-menu__volume-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.mic-menu__volume-slider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .mic-menu__note {
   padding: 0 var(--space-3) var(--space-2);
   font-size: var(--text-xs);
   color: var(--text-3);
+}
+
+/* AFTER the base rule, not before: equal specificity means source order decides, and the
+   modifier losing to the class it modifies is a silent no-op. The English half of a bilingual
+   pair sets its own colour (.diag__en), so the severity is re-asserted there too -- the same
+   trick as .field__hint--warn above. */
+.mic-menu__note--warn,
+.mic-menu__note--warn .diag__en {
+  color: var(--warn);
 }
 
 /* Self tile: a small bar under the name. Looked up by selector on every tick because tiles

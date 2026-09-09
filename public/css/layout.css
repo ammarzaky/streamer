@@ -122,13 +122,38 @@
    remaining height, and a fixed control bar. The roster is a rail beside the stage on wide
    screens and collapses beneath it on narrow ones. The stage is the only region allowed to
    grow, so video never gets squeezed by chrome.
+
+   FOUR rows, not three: `#room-banner` sits between the top bar and the body. It is `hidden`
+   most of the time, and a hidden grid item is not placed at all -- which is why three rows
+   looked correct for a year. The moment a banner appeared it took the `1fr` row, grew to the
+   whole remaining viewport, and pushed the entire stage into the control bar's fixed row.
+   The banner's own row is `auto` so it is exactly as tall as its copy; `1fr` belongs to the
+   body and nothing else.
 */
 
 .room {
   height: 100dvh;
   display: grid;
-  grid-template-rows: var(--topbar-h) 1fr var(--controlbar-h);
+  grid-template-rows: var(--topbar-h) auto 1fr var(--controlbar-h);
   overflow: hidden;
+}
+
+/* Every row named explicitly rather than left to auto-placement. Auto-placement is what broke:
+   it fills the first FREE row, so whether the body landed on `1fr` depended on how many of its
+   siblings happened to be visible. Pinning all four means the banner appearing or disappearing
+   cannot move anything else. Scoped to direct children because `.topbar` is also the landing
+   page's header, which is not in a grid at all. */
+.room > .topbar {
+  grid-row: 1;
+}
+.room > #room-banner {
+  grid-row: 2;
+}
+.room > .room__body {
+  grid-row: 3;
+}
+.room > .controlbar {
+  grid-row: 4;
 }
 
 .topbar {

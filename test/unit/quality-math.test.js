@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   PRESETS,
@@ -13,7 +16,14 @@ import {
   bestPresetForBudget,
   scaleResolutionDownBy,
   isBandwidthGenuinelyShort,
+  CONTENT_FPS,
+  createContentTracker,
+  trackContentMode,
+  encoderSettingsFor,
 } from '../../public/shared/quality-math.js';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const configPath = path.join(here, '..', '..', 'config.default.json');
 
 test('preset ladder is ordered strictly by ascending bitrate', () => {
   // Auto step-down walks this ladder one rung at a time and relies on each step actually
@@ -49,9 +59,13 @@ test('60fps presets keep framerate, 30fps presets keep resolution', () => {
   }
 });
 
-test('default preset exists and is the top rung', () => {
+test('default preset is the top rung and matches media.defaultPreset in config.default.json', () => {
+  // The two must be the same string. A client falling back to a different rung from the one the
+  // server configured is a difference nobody would ever notice.
   assert.ok(PRESET_IDS.includes(DEFAULT_PRESET_ID));
   assert.equal(PRESETS.at(-1).id, DEFAULT_PRESET_ID);
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  assert.equal(config.media.defaultPreset, DEFAULT_PRESET_ID);
 });
 
 test('getPreset throws with a useful message for an unknown id', () => {
@@ -209,4 +223,99 @@ test('the estimate is believed over the send rate, in both directions', () => {
     ),
     true,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Content mode
+// ---------------------------------------------------------------------------
+
+/** Feed a run of identical readings and return the mode after them. */
+function feed(tracker, fps, times) {
+  let mode = tracker.mode;
+  for (let i = 0; i < times; i += 1) mode = trackContentMode(tracker, fps);
+  return mode;
+}
+
+test('content mode needs a sustained run before it commits, in either direction', () => {
+  const tracker = createContentTracker();
+  assert.equal(tracker.mode, null, 'undecided until measured');
+
+  assert.equal(feed(tracker, 2, CONTENT_FPS.samples - 1), null, 'one sample short is still null');
+  assert.equal(trackContentMode(tracker, 2), 'still');
+
+  // Coming back the other way costs the same number of samples: a single busy second while
+  // reading a document must not flip the encoder.
+  assert.equal(feed(tracker, 60, CONTENT_FPS.samples - 1), 'still');
+  assert.equal(trackContentMode(tracker, 60), 'moving');
+});
+
+test('a reading between the thresholds neither builds nor breaks a run', () => {
+  const tracker = createContentTracker();
+  feed(tracker, 2, CONTENT_FPS.samples - 1);
+  // Squarely in the dead band.
+  const ambiguous = (CONTENT_FPS.still + CONTENT_FPS.moving) / 2;
+  assert.equal(trackContentMode(tracker, ambiguous), null, 'ambiguous does not decide');
+  assert.equal(trackContentMode(tracker, 2), 'still', 'and does not reset what was building');
+});
+
+test('a missing reading holds the current answer rather than decaying it', () => {
+  const tracker = createContentTracker();
+  feed(tracker, 2, CONTENT_FPS.samples);
+  assert.equal(trackContentMode(tracker, null), 'still');
+  assert.equal(trackContentMode(tracker, undefined), 'still');
+  assert.equal(trackContentMode(tracker, NaN), 'still');
+});
+
+test('a literal zero is an absent capture, not a still one', () => {
+  // Measured: a synthetic 60fps canvas reported framesPerSecond 0 with its frame counter reset
+  // to 1 for a single sample -- a capture restarting. Counted as evidence, four such samples
+  // declared a moving picture to be a document and dropped it to 3 fps.
+  const tracker = createContentTracker();
+  assert.equal(feed(tracker, 0, CONTENT_FPS.samples * 3), null, 'zero decides nothing');
+
+  // And it does not undo an answer already reached, in either direction.
+  feed(tracker, 60, CONTENT_FPS.samples);
+  assert.equal(tracker.mode, 'moving');
+  assert.equal(feed(tracker, 0, CONTENT_FPS.samples * 3), 'moving');
+});
+
+test('one busy second does not undo a decision, and vice versa', () => {
+  const tracker = createContentTracker();
+  feed(tracker, 1, CONTENT_FPS.samples);
+  assert.equal(trackContentMode(tracker, 60), 'still', 'a single moving sample is not a change');
+  assert.equal(feed(tracker, 1, 1), 'still');
+});
+
+test('encoder settings follow the measured content, not just the preset', () => {
+  const motion = getPreset('1080p60');
+  const text = getPreset('1080p30');
+
+  // Undecided or moving: the preset speaks for itself.
+  assert.deepEqual(encoderSettingsFor(motion, null), {
+    contentHint: motion.contentHint,
+    degradationPreference: motion.degradationPreference,
+  });
+  assert.deepEqual(encoderSettingsFor(motion, 'moving'), {
+    contentHint: 'motion',
+    degradationPreference: 'maintain-framerate',
+  });
+
+  // Still: both levers move together, for either preset. `balanced` rather than
+  // `maintain-resolution` because three peers encoding 1080p with resolution pinned produced
+  // no decodable frame in 25 s -- a still picture that never arrives is worse than a smaller
+  // one that does.
+  for (const preset of [motion, text]) {
+    assert.deepEqual(encoderSettingsFor(preset, 'still'), {
+      contentHint: 'detail',
+      degradationPreference: 'balanced',
+    });
+  }
+});
+
+test('the thresholds leave a gap, and a scrolling document lands above it', () => {
+  assert.ok(CONTENT_FPS.still < CONTENT_FPS.moving, 'hysteresis needs a gap');
+  assert.ok(CONTENT_FPS.samples >= 2, 'a single sample must not decide');
+  // A desktop capturer emits only changed frames: an idle editor sits at 1-3, a scrolling one
+  // at 20-60. The still threshold has to sit well clear of the second.
+  assert.ok(CONTENT_FPS.still < 20);
 });

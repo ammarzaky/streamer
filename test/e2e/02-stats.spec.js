@@ -9,8 +9,13 @@ import {
   outboundVideo,
   encodings,
 } from './helpers/app.js';
+import { DEFAULT_PRESET_ID, getPreset } from '../../public/shared/quality-math.js';
 
 test.describe.configure({ mode: 'serial' });
+
+/** What a fresh room starts on. A unit test pins this to config.default.json's `defaultPreset`,
+ *  so reading it here means the preset can be changed in one place. */
+const defaultPreset = getPreset(DEFAULT_PRESET_ID);
 
 test('the stats panel reports live bitrate, frames, resolution and connection type', async ({
   browser,
@@ -113,8 +118,10 @@ test('a healthy connection keeps the 60fps preset instead of quietly halving it'
   const hostId = await selfId(host);
   const guestId = await selfId(guest);
 
-  // The encoder was allowed 60 to begin with, before adaptation has had a chance to act.
-  expect((await encodings(host, guestId))[0].maxFramerate).toBe(60);
+  // The encoder was given the default preset's ceiling to begin with, before adaptation has had
+  // a chance to act. Read from the ladder rather than hardcoded, so changing the default moves
+  // this with it instead of failing here.
+  expect((await encodings(host, guestId))[0].maxFramerate).toBe(defaultPreset.frameRate);
 
   // Wait out the ramp and then well past the point where the old logic had already stepped down
   // (warm-up plus six consecutive samples).
@@ -140,7 +147,15 @@ test('a healthy connection keeps the 60fps preset instead of quietly halving it'
 
   if (stepDowns.length === 0) {
     // Nothing was constrained, so the chosen preset must have survived intact.
-    expect(await host.locator('#quality-label').innerText()).toBe('1080p 60');
+    expect(await host.locator('#quality-label').innerText()).toBe(defaultPreset.label);
+
+    // The synthetic source is a canvas redrawn every frame, so the content detector must call
+    // it moving. Asserted separately from the frame rate because the two failures need
+    // different answers: 'still' here means the DETECTOR is wrong, while a low rate with
+    // 'moving' means the machine is simply loaded. A bare fps number cannot tell them apart,
+    // and the first version of this test could not either.
+    const contentMode = await host.evaluate(() => window.__app.quality().contentMode);
+    expect(contentMode, 'a 60fps canvas must not be read as a still picture').not.toBe('still');
 
     const rateOver = async (read, field, ms) => {
       const first = await read();
@@ -149,9 +164,25 @@ test('a healthy connection keeps the 60fps preset instead of quietly halving it'
       return ((second[field] - first[field]) / ms) * 1000;
     };
     const fps = await rateOver(() => outboundVideo(host, guestId), 'framesEncoded', 4000);
-    // The floor only has to separate "encoder capped at 30" from "not capped": a step down to
-    // 1080p30 pins this at ~31, while a healthy 1080p60 pipeline sustains 37-63 here.
-    expect(fps, `encoding ${fps.toFixed(1)} fps from a 60fps source`).toBeGreaterThan(33);
+    const where = `${fps.toFixed(1)} fps at the ${defaultPreset.label} default`;
+
+    // Assert what THIS preset promises, because the two families promise opposite things and
+    // a single frame-rate floor is only meaningful for one of them.
+    if (defaultPreset.contentHint === 'motion') {
+      // 'motion' + maintain-framerate: frames are the thing being protected, so a rate near the
+      // neighbouring rung's would mean the encoder was quietly capped.
+      expect(fps, where).toBeGreaterThan(defaultPreset.frameRate * 0.6);
+    } else {
+      // 'detail': the encoder is EXPECTED to spend frame rate on picture quality -- measured at
+      // ~6 fps here from a moving synthetic source, by design. What must hold is the promise it
+      // does make: full resolution, and frames still moving at all.
+      expect(fps, where).toBeGreaterThan(1);
+      const frame = await outboundVideo(host, guestId);
+      expect(frame.frameHeight, `encoding ${frame.frameWidth}x${frame.frameHeight}`).toBe(
+        defaultPreset.height,
+      );
+    }
+    expect(fps, where).toBeLessThan(defaultPreset.frameRate * 1.3);
   }
 
   await hostCtx.close();

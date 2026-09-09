@@ -45,10 +45,18 @@ test('a full session makes no third-party requests and stores nothing', async ({
   expect(persisted.idb, 'no IndexedDB').toBe(0);
   expect(persisted.caches, 'nothing cached').toBe(0);
 
-  // sessionStorage holds exactly one thing: the host token, so a host who reloads gets their
-  // role back. It is per-tab, dies with the tab, and is the only storage this app uses --
-  // asserted precisely rather than waved at, so anything else appearing here fails the build.
-  expect(persisted.sessionKeys).toEqual(['streamer:host:' + new URL(roomUrl).pathname.split('/').pop()]);
+  // sessionStorage holds at most two things, both per-tab and both gone when the tab closes:
+  // the host token, so a host who reloads gets their role back, and the audio preferences
+  // (which speaker, and how loud each participant is). Neither is written until the feature
+  // that owns it is used, and this session uses neither speaker picking nor a volume slider --
+  // so the audio key is ALLOWED here, not required. The set is asserted exactly rather than
+  // waved at, so a third key appearing anywhere fails the build.
+  const hostKey = 'streamer:host:' + new URL(roomUrl).pathname.split('/').pop();
+  const allowed = new Set([hostKey, 'streamer:audio']);
+  for (const key of persisted.sessionKeys) {
+    expect(allowed.has(key), `unexpected sessionStorage key: ${key}`).toBe(true);
+  }
+  expect(persisted.sessionKeys, 'the host token is always there').toContain(hostKey);
 
   await guestCtx.close();
   await ctx.close();

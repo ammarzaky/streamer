@@ -33,6 +33,8 @@ export const DIAG_KIND = Object.freeze({ REPORT: 'report', DUMP_REQUEST: 'dump-r
 
 const clamp01 = (value) => (Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null);
 const nonNegative = (value) => (Number.isFinite(value) && value >= 0 ? value : null);
+/** Playback gain: 0..5, the range the volume slider offers. */
+const gainValue = (value) => (Number.isFinite(value) ? Math.min(5, Math.max(0, value)) : null);
 const shortString = (value, max = 32) => (typeof value === 'string' ? value.slice(0, max) : null);
 const bool = (value) => (typeof value === 'boolean' ? value : null);
 
@@ -76,6 +78,12 @@ function normalizeReport(raw) {
           readyState: Number.isFinite(sink.readyState) ? sink.readyState : null,
           muted: bool(sink.muted),
           volume: clamp01(sink.volume),
+          // A separate field with its own ceiling, NOT folded into `volume`: the element's
+          // volume is 0..1 by specification and clamping a 5x boost into it would report "1"
+          // for both "as they sent it" and "five times louder", which is the one distinction a
+          // reader of this report would want.
+          gain: gainValue(sink.gain),
+          outputVia: sink.outputVia === 'webaudio' ? 'webaudio' : 'element',
           playError: shortString(sink.playError),
         }
       : null,
