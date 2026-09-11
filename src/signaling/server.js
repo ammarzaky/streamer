@@ -14,7 +14,7 @@ import { toClientConfig } from '../config.js';
 import { handlers } from './handlers.js';
 import { startHeartbeat } from './heartbeat.js';
 import { startJanitor } from './janitor.js';
-import { createRateLimiter } from './rateLimit.js';
+import { createRateLimiter, TokenBucket } from './rateLimit.js';
 import { RoomRegistry } from './rooms.js';
 import { acceptsUpgrade, rejectUpgrade } from './upgrade.js';
 import { validateMessage } from './validate.js';
@@ -80,6 +80,8 @@ export function attachSignaling(server, config, log = console) {
   server.on('upgrade', upgrade);
 
   wss.on('connection', (socket, request) => {
+    // Chat cannot spend the tokens needed for call controls or ICE negotiation.
+    const chatBucket = new TokenBucket({ capacity: 6, refillPerSec: 2 });
     socket.meta = {
       state: STATE.UNJOINED,
       room: null,
@@ -112,7 +114,9 @@ export function attachSignaling(server, config, log = console) {
       }
 
       const kind = SIGNAL_TYPES.has(result.message.type) ? 'signal' : 'control';
-      const rate = limiter.take(socket, kind);
+      const rate = result.message.type === C2S.CHAT
+        ? { ok: chatBucket.take(), disconnect: false }
+        : limiter.take(socket, kind);
       if (!rate.ok) {
         send(
           socket,

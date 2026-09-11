@@ -131,8 +131,8 @@ export const MIC_MENU = {
   },
   /** Shown only while sharing system audio, where playback is inside the shared track. */
   volumeLoopbackWarning: {
-    ar: 'إنت بتشارك صوت النظام: الصوت اللي بتسمعه بيترجعلهم جوا المشاركة، فالتعلية هترجعلهم أعلى.',
-    en: 'You are sharing system audio: what you hear is inside the shared track, so a boost goes back to them louder.',
+    ar: 'شغّل الفيديو في تطبيق تاني؛ نسخة ويندوز المحدثة بتستبعد صوت المكالمة من مشاركة صوت النظام.',
+    en: 'Play the video in another app; the updated Windows app excludes call playback from system audio sharing.',
   },
   processing: { ar: 'معالجة الصوت', en: 'Audio processing' },
   aec: { ar: 'إلغاء الصدى (AEC)', en: 'Echo cancellation (AEC)' },

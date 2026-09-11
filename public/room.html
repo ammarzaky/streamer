@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="/css/base.css" />
     <link rel="stylesheet" href="/css/layout.css" />
     <link rel="stylesheet" href="/css/components.css" />
+    <link rel="stylesheet" href="/css/chat.css" />
     <link rel="modulepreload" href="/js/main-room.js" />
     <link rel="modulepreload" href="/shared/protocol.js" />
   </head>
@@ -173,6 +174,22 @@
           </div>
           <div class="roster__list" id="roster-list"></div>
           <div class="roster__foot" id="stats-panel" hidden></div>
+          <section class="chat chat--open" id="chat-panel" aria-label="Room chat panel">
+            <button type="button" class="chat__toggle" data-testid="chat-toggle" aria-expanded="true" aria-controls="chat-body">Chat · الشات <span class="badge" id="chat-unread" hidden></span></button>
+            <div class="chat__body" id="chat-body">
+              <p class="field__hint" id="chat-empty">Say hello 👋 Messages stay only in this session.</p>
+              <div id="chat-log" class="chat__log" role="log" aria-label="Room chat" aria-live="polite" aria-relevant="additions" data-testid="chat-log"></div>
+              <form id="chat-form" class="chat__form">
+                <label class="field__label" for="chat-input">Message · رسالة</label>
+                <textarea id="chat-input" class="input" rows="2" dir="auto" placeholder="Write a message…" data-testid="chat-input" disabled></textarea>
+                <button id="chat-send" class="btn btn--primary btn--sm" type="submit" data-testid="chat-send" disabled>Send · إرسال</button>
+                <button id="chat-attach" class="btn btn--ghost btn--sm" type="button" data-testid="chat-attach" disabled>Attach file · ملف</button>
+                <input id="chat-file" type="file" data-testid="chat-file" hidden />
+              </form>
+              <p id="chat-status" class="field__hint" role="status">Connecting…</p>
+              <p id="file-status" class="field__hint" role="status">Files up to 100 MB · Offered to connected participants</p>
+            </div>
+          </section>
         </aside>
       </div>
 

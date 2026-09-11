@@ -1049,7 +1049,8 @@ export function createRoomView({ store, bus, EVENTS }) {
     // land on this one element, and a MediaStreamAudioSourceNode reads only the stream's first
     // audio track -- so a per-stream graph would drop the shared audio without a word.
     mixer.attach(peerId, track);
-    if (mixer.isRouted(peerId)) audio.muted = true;
+    audio.muted = incomingMuted || mixer.isRouted(peerId);
+    audio.volume = mixer.isRouted(peerId) ? 1 : Math.min(mixer.gain(peerId), 1);
     applySinkId(audio);
 
     for (const type of ['mute', 'unmute', 'ended']) {
@@ -1120,7 +1121,7 @@ export function createRoomView({ store, bus, EVENTS }) {
 
   function setIncomingMuted(flag) {
     incomingMuted = Boolean(flag);
-    for (const audio of audioElements.values()) audio.muted = incomingMuted;
+    for (const [peerId, audio] of audioElements) audio.muted = incomingMuted || mixer.isRouted(peerId);
     // The mixer's output is a sink too. Missing it would leave a boosted peer audible with
     // "mute incoming audio" ticked, which is exactly the confusion that switch exists to rule
     // out.
@@ -1166,8 +1167,7 @@ export function createRoomView({ store, bus, EVENTS }) {
    *
    * Above 1 the element cannot help -- `HTMLMediaElement.volume` is clamped by the
    * specification -- so the peer moves onto the Web Audio path and their own element is muted
-   * so nobody is heard twice. Below 1 they move too, deliberately: one adjusted peer should
-   * behave identically whichever side of 100% the slider is on.
+   * so nobody is heard twice. At or below 1, restore the original remote playback element.
    */
   function setPeerVolume(peerId, value) {
     const gain = clampGain(value);

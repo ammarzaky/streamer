@@ -6,13 +6,9 @@
  * and this is that graph -- kept out of `room-view.js` because it is the only part of playback
  * that is arithmetic rather than DOM, and arithmetic is worth unit tests.
  *
- * **It engages lazily, per peer.** A participant nobody has adjusted keeps playing through the
- * plain `<audio>` element exactly as before: same element, same `play()` handling, same
- * diagnostics. Only a peer whose slider has been moved is routed through here, and once routed
- * they stay routed for the session. Two reasons, both learned the hard way in this file's
- * neighbours: a path that only some people take must be the path that is *added*, never the one
- * that replaces a working default; and switching a live element between two playback paths at
- * the moment a slider crosses 100% would put a click in the middle of a drag.
+ * **It engages lazily, per peer, above 100%.** Lower volumes use the original remote audio
+ * element, preserving its WebRTC playback reference for echo cancellation. Returning to
+ * 100% or below disconnects the graph for that peer; the caller restores the original element.
  *
  * A source node per TRACK, not per stream. A peer's microphone and their shared system audio
  * arrive as two tracks that `room-view` adds to one MediaStream on one element, and
@@ -225,10 +221,13 @@ export function createRemoteAudioMixer({
       const peer = entry(peerId);
       peer.gain = gain;
 
-      // Unity on a peer who has never been touched stays on the plain element: not building a
-      // graph is the difference between this feature costing nothing and it costing an
-      // AudioContext for everyone in every call.
-      if (!peer.routed && gain === UNITY_GAIN) return false;
+      // Attenuation needs no graph. Keep the original remote stream as the playback source
+      // so the browser retains its WebRTC echo-cancellation reference.
+      if (gain <= UNITY_GAIN) {
+        for (const record of peer.tracks.values()) unwire(record);
+        peer.routed = false;
+        return false;
+      }
 
       if (!peer.routed) {
         if (!ensureContext()) return false;

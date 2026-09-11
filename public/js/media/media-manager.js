@@ -410,10 +410,9 @@ export function createMediaManager({
     }
 
     const wantAudio = config?.media?.includeDisplayAudio !== false;
-    // Chromium 141+ can keep the capturing page's own playback out of a tab/system capture,
-    // which is the browser-side cure for "everyone hears their own voice echoed back when I
-    // share". It is a no-op where unsupported, and it does NOT apply to the desktop app's
-    // Windows loopback path, which bypasses constraints entirely -- see desktop/capture.js.
+    // Electron 43.4+ honors this on Windows as well: exclude this application's playback
+    // from system capture, including amplified participant audio. Keep film playback in
+    // another application so it remains part of the shared audio.
     const supportsRestrictOwnAudio = Boolean(
       navigator.mediaDevices.getSupportedConstraints?.()?.restrictOwnAudio,
     );

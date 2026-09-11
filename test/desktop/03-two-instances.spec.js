@@ -13,12 +13,13 @@ async function openRoom(app) {
   await main.waitForURL(`https://localhost:${PORT}/r/new`, { timeout: 45_000 });
 
   await main.getByLabel('Your name').fill('Host');
+  const panelOpened = app.waitForEvent('window', { timeout: 30_000 });
   await main.getByRole('button', { name: /create room/i }).click();
   await main.waitForURL(new RegExp(`^https://localhost:${PORT}/r/[A-Za-z0-9_-]{8,}$`), {
     timeout: 30_000,
   });
 
-  const panel = await app.waitForEvent('window', { timeout: 30_000 });
+  const panel = await panelOpened;
   await panel.waitForLoadState('domcontentloaded');
 
   // The localhost entry is the one a second instance on this machine can actually reach.
@@ -102,10 +103,10 @@ test('the in-app picker shares a real screen, with no browser dialog', async () 
   const hostApp = await launchApp({ port: PORT });
   const { main: hostWin } = await openRoom(hostApp);
 
+  // Subscribe before clicking: a fast renderer can open the picker before click resolves.
+  const pickerOpened = hostApp.waitForEvent('window', { timeout: 30_000 });
   await hostWin.getByTestId('share-toggle').click();
-
-  // Our own window, not Chrome's dialog.
-  const picker = await hostApp.waitForEvent('window', { timeout: 30_000 });
+  const picker = await pickerOpened;
   await picker.waitForLoadState('domcontentloaded');
   await expect(picker.getByTestId('picker-grid')).toBeVisible();
 
@@ -138,16 +139,17 @@ test('cancelling the picker leaves the app usable rather than stuck', async () =
   const hostApp = await launchApp({ port: PORT });
   const { main: hostWin } = await openRoom(hostApp);
 
+  const pickerOpened = hostApp.waitForEvent('window', { timeout: 30_000 });
   await hostWin.getByTestId('share-toggle').click();
-  const picker = await hostApp.waitForEvent('window', { timeout: 30_000 });
+  const picker = await pickerOpened;
   await picker.waitForLoadState('domcontentloaded');
   await picker.getByTestId('picker-cancel').click();
 
   // The button comes back, and a second attempt opens a fresh picker.
   await expect(hostWin.getByTestId('share-toggle')).toBeEnabled({ timeout: 20_000 });
+  const secondOpened = hostApp.waitForEvent('window', { timeout: 30_000 });
   await hostWin.getByTestId('share-toggle').click();
-
-  const second = await hostApp.waitForEvent('window', { timeout: 30_000 });
+  const second = await secondOpened;
   await second.waitForLoadState('domcontentloaded');
   await expect(second.getByTestId('picker-grid')).toBeVisible();
 

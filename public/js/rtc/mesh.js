@@ -13,7 +13,7 @@ import { C2S, S2C } from '../../shared/protocol.js';
 import { createPeer } from './peer.js';
 import { logger } from '../core/logger.js';
 
-export function createMesh({ send, config, onTrack, onPeerState, onPeerFailed, onNegotiated, onDiagMessage }) {
+export function createMesh({ send, config, onTrack, onPeerState, onPeerFailed, onNegotiated, onDiagMessage, onFileChannel }) {
   /** peerId -> Peer */
   const peers = new Map();
 
@@ -55,6 +55,7 @@ export function createMesh({ send, config, onTrack, onPeerState, onPeerFailed, o
       onFailed: (err) => onPeerFailed?.(id, err),
       onNegotiated,
       onDiagMessage,
+      onFileChannel,
     });
 
     peers.set(id, peer);

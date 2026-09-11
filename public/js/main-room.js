@@ -13,6 +13,8 @@ import { C2S, S2C, ERRORS, CLOSE, END_REASON, LEAVE_REASON } from '../shared/pro
 import { DEFAULT_PRESET_ID, getPreset } from '../shared/quality-math.js';
 
 import { store } from './state/room-store.js';
+import { createChat } from './ui/chat.js';
+import { createFileChat } from './ui/file-chat.js';
 import { bus, EVENTS } from './core/event-bus.js';
 import { logger } from './core/logger.js';
 import { checkEnvironment, isE2E, environmentSummary } from './core/env.js';
@@ -357,6 +359,7 @@ function buildEngine() {
     // Negotiation resets encoder parameters, so they are re-applied every time one completes.
     onNegotiated: () => void quality?.apply(),
     onDiagMessage: handleDiagMessage,
+    onFileChannel: (event) => files.attachPeer(event),
   });
 
   media ??= createMediaManager({
@@ -589,6 +592,18 @@ let hasJoined = false;
  * until `joined` lands, and a room message sent in that window is a WRONG_STATE error.
  */
 let joinedOnThisSocket = false;
+let chatAvailable = false;
+const chat = createChat({
+  send: (...args) => signaling.send(...args),
+  canSend: () => joinedOnThisSocket && signaling?.isOpen && !tornDown,
+});
+const files = createFileChat({
+  chat,
+  canSend: () => joinedOnThisSocket && signaling?.isOpen && !tornDown,
+  // One shared cap across all recipients, using at most 5% of configured upload.
+  rateBytesPerSecond: () => Math.min(media?.isSharing ? 32768 : 131072,
+    (quality?.uploadBudgetBps ?? 1000000) * 0.05 / 8),
+});
 /** Set by teardown: nothing may re-open the microphone or touch the mesh after it. */
 let tornDown = false;
 
@@ -599,6 +614,9 @@ function sendMuteState(muted) {
 }
 
 function handleSignalingStatus({ status, attempt }) {
+  files.refresh();
+  // Reopening the socket is not membership: wait for ROOM_CREATED/JOINED to enable chat.
+  if (status !== 'open') chat.setConnection(false, chatAvailable);
   store.setSignaling({ status, attempt });
   logger.debug('signaling status', { status, attempt });
 
@@ -697,7 +715,11 @@ function routeMessage(message) {
       onRoomEnded(data);
       return;
     case S2C.ERROR:
+      if (chat.receive(message)) return;
       onServerError(data);
+      return;
+    case S2C.CHAT:
+      chat.receive(message);
       return;
     case S2C.PONG:
       return;
@@ -707,6 +729,8 @@ function routeMessage(message) {
 }
 
 function onWelcome(data) {
+  chatAvailable = data.chatEnabled === true;
+  chat.setConnection(false, chatAvailable);
   serverConfig = {
     iceServers: data.iceServers ?? [],
     media: {
@@ -769,6 +793,8 @@ function onJoined(data) {
 function applyJoinedIdentity(data) {
   hasJoined = true;
   joinedOnThisSocket = true;
+  chat.setConnection(true, chatAvailable);
+  files.refresh();
   leaving = false;
 
   store.setSelf({
@@ -2258,6 +2284,8 @@ function teardown() {
   // only thing this app ever persisted past a session.
   forgetHostToken();
   tornDown = true;
+  files.clear();
+  chat.clear();
   clearInterval(healthTimer);
   healthTimer = null;
   for (const timer of pendingDumpRequests.values()) clearTimeout(timer);

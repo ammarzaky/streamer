@@ -34,6 +34,7 @@ export const C2S = Object.freeze({
   LEAVE: 'leave',
   END: 'end',
   MUTE_STATE: 'mute-state',
+  CHAT: 'chat',
   CLAIM_SHARE: 'claim-share',
   RELEASE_SHARE: 'release-share',
   OFFER: 'offer',
@@ -50,6 +51,7 @@ export const S2C = Object.freeze({
   PEER_JOINED: 'peer-joined',
   PEER_LEFT: 'peer-left',
   PEER_MUTE_STATE: 'peer-mute-state',
+  CHAT: 'chat',
   HOST_CHANGED: 'host-changed',
 
   /**
@@ -94,6 +96,7 @@ export const LEGAL_IN_STATE = Object.freeze({
   [C2S.LEAVE]: [STATE.JOINED],
   [C2S.END]: [STATE.JOINED],
   [C2S.MUTE_STATE]: [STATE.JOINED],
+  [C2S.CHAT]: [STATE.JOINED],
   [C2S.CLAIM_SHARE]: [STATE.JOINED],
   [C2S.RELEASE_SHARE]: [STATE.JOINED],
   [C2S.OFFER]: [STATE.JOINED],
@@ -275,6 +278,7 @@ export const LIMITS = Object.freeze({
   MAX_SDP_BYTES: 32_768,
   MAX_CANDIDATE_BYTES: 4_096,
   MAX_NAME_CHARS: 32,
+  MAX_CHAT_CHARS: 2000,
   MAX_CORRELATION_ID_CHARS: 32,
   MAX_ROOM_ID_CHARS: 64,
   MAX_PEER_ID_CHARS: 64,
@@ -341,7 +345,12 @@ export function parseEnvelope(raw) {
     }
   }
 
-  return { ok: true, message: { v: parsed.v, type: parsed.type, id: parsed.id, data } };
+  if (parsed.ref !== undefined &&
+      (typeof parsed.ref !== 'string' || parsed.ref.length > LIMITS.MAX_CORRELATION_ID_CHARS)) {
+    return { ok: false, code: ERRORS.INVALID_ENVELOPE, detail: 'ref must be a short string' };
+  }
+  return { ok: true, message: { v: parsed.v, type: parsed.type, id: parsed.id, data,
+    ...(parsed.ref === undefined ? {} : { ref: parsed.ref }) } };
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +358,7 @@ export function parseEnvelope(raw) {
 // ---------------------------------------------------------------------------
 
 /**
- * Display names are the only free text in the app.
+ * Display names have stricter layout requirements than chat text.
  *
  * Trimmed, length-capped, and stripped of control characters so a name cannot break the
  * roster layout or smuggle line breaks into it. Filtering by code point rather than by a

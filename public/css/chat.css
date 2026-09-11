@@ -1,0 +1,35 @@
+.chat { border-top: 1px solid var(--line-1); min-height: 0; flex: 0 0 auto; }
+.chat--open { display: flex; flex-direction: column; flex: 1 1 55%; min-height: 220px; }
+.chat__toggle { cursor: pointer; padding: var(--space-3); font-weight: var(--weight-semibold); flex-shrink: 0; text-align: start; width: 100%; }
+.chat__body { display: flex; flex-direction: column; gap: var(--space-2); padding: 0 var(--space-3) var(--space-3); min-height: 0; flex: 1; }
+.chat__log { flex: 1; min-height: 40px; overflow-y: auto; overflow-anchor: none; }
+.chat__message { margin-bottom: var(--space-3); padding: var(--space-2); background: var(--surface-2); border-radius: var(--radius-sm); }
+.chat__meta { display: flex; justify-content: space-between; gap: var(--space-2); font-size: var(--text-xs); color: var(--text-2); }
+.chat__meta bdi { overflow-wrap: anywhere; font-weight: var(--weight-semibold); }
+.chat__meta time { flex-shrink: 0; }
+.chat__message p { white-space: pre-wrap; overflow-wrap: anywhere; margin: var(--space-1) 0 0; }
+.chat__form { display: grid; gap: var(--space-2); }
+.chat__form textarea { resize: none; min-width: 0; }
+.chat__form button { justify-self: end; }
+.chat__form #chat-attach { justify-self: start; grid-row: 3; grid-column: 1; }
+.chat__form #chat-send { grid-row: 3; grid-column: 1; }
+.file-card { display: flex; flex-direction: column; gap: 6px; }
+.file-card__name { overflow-wrap: anywhere; font-weight: var(--weight-semibold); }
+.file-card progress { width: 100%; height: 6px; }
+.file-card__actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.roster:has(.chat--open) .roster__list { flex: 0 1 auto; max-height: 30%; }
+.roster:has(.chat--open) .roster__foot { max-height: 25%; overflow-y: auto; }
+.room { grid-template-columns: minmax(0, 1fr); }
+.room__body, .roster { min-width: 0; }
+
+@media (max-width: 860px) {
+  .roster:has(.chat--open) { max-height: none; overflow: hidden; }
+  .chat--open { min-height: 200px; }
+  .room__body { grid-template-columns: minmax(0, 1fr); }
+  .room__body:has(.chat--open) { grid-template-rows: minmax(80px, 1fr) minmax(430px, 60%); }
+  .roster:has(.chat--open) .roster__list { max-height: 58px; }
+  .chat__form { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+  .chat__form label { grid-column: 1 / -1; }
+  .chat__form #chat-send { grid-row: 2; grid-column: 2; }
+  .chat__form #chat-attach { grid-row: 3; grid-column: 1 / -1; }
+}

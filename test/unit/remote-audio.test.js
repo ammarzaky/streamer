@@ -209,14 +209,23 @@ test('changing the gain again does not rebuild anything', () => {
   assert.equal(m.gain('p1'), 0);
 });
 
-test('once routed, a peer stays routed even back at unity', () => {
-  // Otherwise crossing 100% mid-drag would switch playback paths under the pointer and put a
-  // click in the middle of the gesture.
+test('returning to unity restores the original remote playback path', () => {
+  // Returning to ordinary volume must stop the graph from playing the same track as the element.
   const m = mixer();
   m.attach('p1', track('mic'));
   m.setGain('p1', 2);
-  assert.equal(m.setGain('p1', 1), true);
-  assert.equal(m.isRouted('p1'), true);
+  assert.equal(m.setGain('p1', 1), false);
+  assert.equal(m.isRouted('p1'), false);
+});
+
+test('lowering volume never creates a local mixed stream', () => {
+  const m = mixer();
+  m.attach('p1', track('mic'));
+  for (const gain of [0.8, 0, 0.5, 1]) {
+    assert.equal(m.setGain('p1', gain), false);
+    assert.equal(m.gain('p1'), gain);
+  }
+  assert.equal(m.active, false);
 });
 
 test('peers are independent', () => {

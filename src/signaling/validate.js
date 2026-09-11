@@ -3,6 +3,7 @@ import { C2S, C2S_TYPES, ERRORS, LEGAL_IN_STATE, LIMITS, normalizeName, parseEnv
 const empty = (d) => Object.keys(d).length === 0;
 const exact = (d, keys) => Object.keys(d).every((k) => keys.includes(k));
 const validators = {
+  [C2S.CHAT]: (d) => exact(d, ['text']) && typeof d.text === 'string' && d.text.length <= LIMITS.MAX_CHAT_CHARS && d.text.trim().length > 0,
   [C2S.CREATE_ROOM]: (d) => exact(d, ['name']) && normalizeName(d.name) !== null,
   [C2S.JOIN]: (d) => exact(d, ['roomId', 'name', 'hostToken', 'accessCode']) && isValidRoomId(d.roomId) && normalizeName(d.name) !== null && optionalString(d.hostToken) && optionalString(d.accessCode),
   [C2S.LEAVE]: empty, [C2S.END]: empty, [C2S.PING]: empty,

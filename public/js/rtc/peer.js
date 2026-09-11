@@ -19,6 +19,7 @@ import { C2S, ERRORS } from '../../shared/protocol.js';
 import { AppError } from '../core/errors.js';
 import { logger } from '../core/logger.js';
 import { DIAG_LABEL, DUMP_LABEL } from './diag-channel.js';
+import { FILE_CHANNEL } from './file-transfer.js';
 
 /** Remote candidates that arrive before the remote description is set are queued. The cap
  *  stops a misbehaving or malicious peer growing this without bound. */
@@ -57,6 +58,7 @@ export function createPeer({
   onFailed,
   onNegotiated,
   onDiagMessage,
+  onFileChannel,
 }) {
   const pc = new RTCPeerConnection({
     iceServers,
@@ -109,6 +111,7 @@ export function createPeer({
    */
   let diag = null;
   let dump = null;
+  let files = null;
 
   // -------------------------------------------------------------------------
   // Transceivers
@@ -199,6 +202,7 @@ export function createPeer({
       wireChannel(diag, 'diag');
       dump = pc.createDataChannel(DUMP_LABEL, { ordered: true });
       wireChannel(dump, 'dump');
+      wireFiles(pc.createDataChannel(FILE_CHANNEL, { ordered: true }));
     } catch (err) {
       // A browser without data channels still gets a working call; it just cannot report.
       logger.warn('peer: diag channels unavailable', { peerId, error: err?.message });
@@ -206,6 +210,7 @@ export function createPeer({
   }
 
   pc.addEventListener('datachannel', ({ channel }) => {
+    if (channel.label === FILE_CHANNEL) { wireFiles(channel); return; }
     if (channel.label === DIAG_LABEL) {
       diag = channel;
       wireChannel(channel, 'diag');
@@ -214,6 +219,12 @@ export function createPeer({
       wireChannel(channel, 'dump');
     }
   });
+
+  function wireFiles(channel) {
+    if (files || closed) { channel.close(); return; }
+    files = channel;
+    onFileChannel?.({ peerId, name, channel });
+  }
 
   function sendDiag(text) {
     if (closed || diag?.readyState !== 'open') return false;
@@ -601,6 +612,7 @@ export function createPeer({
     try {
       diag?.close();
       dump?.close();
+      files?.close();
     } catch {
       // Already closed with the connection.
     }

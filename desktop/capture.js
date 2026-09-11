@@ -73,13 +73,10 @@ export function installCapture(session, getParent) {
  * Windows can hand us the system mix; macOS and Linux cannot do it this way, and asking anyway
  * makes the whole request fail rather than degrading to video-only.
  *
- * What 'loopback' captures deserves saying plainly, because it is the cause of "I hear my own
- * voice when my friend shares": it is a WASAPI loopback of the default render endpoint -- the
- * WHOLE system mix, including this app's own playback of every other participant. The sharer
- * therefore sends everyone's voices back to them, delayed by a round trip (electron/electron
- * #27337). 'loopbackWithMute' would silence the sharer's own speakers rather than exclude our
- * output, and Chromium's restrictOwnAudio does not apply to this path, so the honest options are
- * the picker's "Share system audio" checkbox and headphones. Both are documented.
+ * The renderer requests restrictOwnAudio. Electron 43.4.0+ honors that constraint and selects
+ * loopbackWithoutChrome internally, excluding our playback from the system mix. Keep the
+ * Electron minimum in package.json: older versions silently include the call in shared audio.
+ * https://releases.electronjs.org/pr/52455
  */
 const systemAudio = () => (process.platform === 'win32' ? 'loopback' : undefined);
 

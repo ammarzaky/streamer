@@ -186,6 +186,13 @@ test('a participant can be turned up past what the element alone can reach', asy
   // paid by everyone who never touches this.
   expect(await host.evaluate(() => window.__app.mixer().active)).toBe(false);
 
+  await slider.fill('50');
+  await slider.dispatchEvent('input');
+  const quiet = await host.evaluate((id) => window.__app.audioSinks()[id], guestId);
+  expect(quiet.volume).toBe(0.5);
+  expect(quiet.outputVia).toBe('element');
+  expect(await host.evaluate(() => window.__app.mixer().active)).toBe(false);
+
   await slider.fill('300');
   await slider.dispatchEvent('input');
 
@@ -206,6 +213,18 @@ test('a participant can be turned up past what the element alone can reach', asy
   await host.waitForTimeout(2500);
   await expect(host.getByTestId(`peer-volume-${guestId}`)).toHaveValue('300');
   expect(await host.evaluate(() => window.__app.peerVolumes())).toEqual({ [guestId]: 3 });
+
+  await host.getByTestId('mic-incoming-mute').check();
+  await host.getByTestId('mic-incoming-mute').uncheck();
+  expect(await host.evaluate((id) => window.__app.audioSinks()[id].muted, guestId)).toBe(true);
+  expect(await host.getByTestId('mixer-output').evaluate((audio) => audio.muted)).toBe(false);
+
+  await slider.fill('80');
+  await slider.dispatchEvent('input');
+  const restored = await host.evaluate((id) => window.__app.audioSinks()[id], guestId);
+  expect(restored.outputVia).toBe('element');
+  expect(restored.volume).toBe(0.8);
+  expect(restored.muted).toBe(false);
 
   await hostCtx.close();
   await guestCtx.close();

@@ -100,6 +100,7 @@ export function toClientConfig(config) {
     bundlePolicy: config.webrtc.bundlePolicy,
 
     maxParticipants: config.rooms.maxParticipants,
+    chatEnabled: true,
     oneSharerAtATime: config.rooms.oneSharerAtATime,
 
     defaultPreset: config.media.defaultPreset,

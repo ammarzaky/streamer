@@ -81,6 +81,21 @@ otherwise.
   person you turned up is never told.
 - **See who is in the room**, who is muted, who is sharing, and whether each connection is
   healthy.
+- **Room chat** beside the participants: Arabic/emoji, Enter to send, Shift+Enter for a new
+  line, and an unread badge when collapsed. Up to 2,000 characters per message and the latest
+  100 messages in page memory. Chat travels through the room's HTTPS/WSS server, separate from
+  peer-to-peer media. It is not recorded, included in diagnostics, or replayed to late joiners;
+  reloading clears your transcript. Both sides need a chat-capable client and host.
+- **Attach files in chat**, up to 100 MB per file. Each connected recipient chooses Receive
+  before any file bytes are sent, then Download when complete. Progress and cancellation are
+  shown separately for each recipient. Files use a reliable WebRTC data channel and are not
+  uploaded to the room server; a configured TURN relay can carry them like other WebRTC traffic.
+  Transfers are paced together at up to 5% of configured upload speed, with a 32 KB/s ceiling
+  while screen sharing and 128 KB/s otherwise (minimum 1 KB/s). This limits interference but
+  cannot guarantee uninterrupted video on a congested connection. Each recipient needs a
+  separate copy of the file, so file size and recipient count determine the data used.
+  Received files stay in page memory (200 MB total) until removed or the room closes; download
+  anything you want to keep first. Interrupted transfers must be resent. Both ends need this version.
 - **A stats panel** showing bitrate, frame rate, resolution, connection type, and — the useful
   one — what is currently limiting your quality.
 - **Up to 4 people** by default, because everyone connects to everyone else.

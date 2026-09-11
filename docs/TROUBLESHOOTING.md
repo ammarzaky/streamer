@@ -222,13 +222,10 @@ own machine playing you back locally, and it does nothing for a silent capture. 
 
 ### I hear myself only while my friend shares from the desktop app
 
-Then it is coming back from their side. The desktop picker's **Share system audio** box
-(default on, Windows only) captures the entire system mix through Windows loopback — including
-that app's own playback of you and everyone else — so whatever you say goes out again inside
-their shared audio. This is a platform limitation (electron/electron#27337), not something echo
-cancellation or the app can filter out. Ask them to untick **Share system audio**, or have
-everyone use headphones. Step 2 of the Audio check ("No, I do not hear myself while muted")
-points to exactly this.
+Update the sharing participant to Streamer 1.5.1 or later. The bundled runtime honors
+`restrictOwnAudio`, excluding Streamer's playback from Windows system-audio capture.
+Play the film in another application. On older versions, untick **Share system audio** to
+stop digital loopback; headphones only address acoustic feedback through the microphone.
 
 ### The level bar
 

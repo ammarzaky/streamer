@@ -1,4 +1,5 @@
 import { WebSocket } from 'ws';
+import { randomUUID } from 'node:crypto';
 import {
   C2S,
   CLAIM_OUTCOME,
@@ -113,6 +114,14 @@ function join(ctx, message) {
 function leave(ctx) { ctx.registry.removePeer(ctx.room, ctx.peer, { reason: LEAVE_REASON.LEFT, intentional: true, send: ctx.send, broadcast: ctx.broadcast }); ctx.socket.close(CLOSE.LEFT); }
 function end(ctx) { if (ctx.room.hostPeerId !== ctx.peer.id) return error(ctx, ERRORS.NOT_HOST, 'Only the host can end the room'); ctx.endRoom(ctx.room, END_REASON.HOST_ENDED); }
 function mute(ctx, message) { ctx.peer.micMuted = message.data.micMuted; ctx.broadcast(ctx.room, S2C.PEER_MUTE_STATE, { peerId: ctx.peer.id, micMuted: ctx.peer.micMuted }, { except: ctx.peer.id }); }
+function chat(ctx, message) {
+  const data = { id: randomUUID(), peerId: ctx.peer.id, name: ctx.peer.name,
+    text: message.data.text.trim(), sentAt: Date.now() };
+  // Identity comes from membership, never from a client-supplied name or destination.
+  // Echo to the sender only after accepting; no persistence or message logging.
+  ctx.send(ctx.socket, S2C.CHAT, data, message.id);
+  ctx.broadcast(ctx.room, S2C.CHAT, data, { except: ctx.peer.id });
+}
 function relay(ctx, message) { const target = ctx.room.peers.get(message.data.to); if (!target || target.socket.readyState !== WebSocket.OPEN) return error(ctx, ERRORS.PEER_NOT_FOUND, 'Peer not found'); const data = { ...message.data, from: ctx.peer.id }; delete data.to; const type = message.type === C2S.OFFER ? S2C.OFFER : message.type === C2S.ANSWER ? S2C.ANSWER : S2C.ICE_CANDIDATE; ctx.send(target.socket, type, data); }
 function claim(ctx, message) {
   const result = resolveClaim({ claimantId: ctx.peer.id, force: message.data.force }, ctx.room);
@@ -130,4 +139,4 @@ function release(ctx, message) {
   ctx.room.currentSharer = null; ctx.room.shareEpoch++; ctx.broadcast(ctx.room, S2C.SHARE_STATE, shareData(ctx.room));
 }
 
-export const handlers = Object.freeze({ [C2S.CREATE_ROOM]: createRoom, [C2S.JOIN]: join, [C2S.LEAVE]: leave, [C2S.END]: end, [C2S.MUTE_STATE]: mute, [C2S.CLAIM_SHARE]: claim, [C2S.RELEASE_SHARE]: release, [C2S.OFFER]: relay, [C2S.ANSWER]: relay, [C2S.ICE_CANDIDATE]: relay, [C2S.PING]: (ctx, message) => ctx.send(ctx.socket, S2C.PONG, {}, message.id) });
+export const handlers = Object.freeze({ [C2S.CHAT]: chat, [C2S.CREATE_ROOM]: createRoom, [C2S.JOIN]: join, [C2S.LEAVE]: leave, [C2S.END]: end, [C2S.MUTE_STATE]: mute, [C2S.CLAIM_SHARE]: claim, [C2S.RELEASE_SHARE]: release, [C2S.OFFER]: relay, [C2S.ANSWER]: relay, [C2S.ICE_CANDIDATE]: relay, [C2S.PING]: (ctx, message) => ctx.send(ctx.socket, S2C.PONG, {}, message.id) });

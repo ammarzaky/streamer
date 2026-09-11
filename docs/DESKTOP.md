@@ -70,27 +70,12 @@ system audio**, a checkbox that is ticked by default, because "nobody could hear
 sharing" is the single most common complaint about screen sharing and it is caused by the
 checkbox Chrome's dialog hides.
 
-What that checkbox captures deserves saying plainly. It is a WASAPI loopback of the default
-render endpoint (Electron's `audio: 'loopback'`): **the whole mix this PC plays, including this
-app's own playback of the other participants.** Their voices go back out to them inside the
-shared audio track, and they hear themselves echoed — only while you are sharing
-(electron/electron#27337). The picker says so next to the checkbox. Two honest fixes:
-
-- **Untick "Share system audio"** for a voice-only session, or one where people complain of echo.
-  The microphone is a separate track and keeps working.
-- **Headphones** on everyone, so that what comes back is at least not re-captured by
-  microphones. Unticking is the one that removes the call from the shared track.
-
-Two things that do *not* fix it: Electron's `loopbackWithMute` would silence the sharer's own
-speakers instead of excluding this app's output, and Chromium's `restrictOwnAudio` does not
-apply to the Electron loopback path (the web client requests it only in a browser, where it is
-honoured when supported). Echo cancellation does not help either — see below.
-
-**The per-participant volume sliders sit on the wrong side of this.** They act on playback, and
-playback is exactly what the loopback captures — so turning someone up to 500% while sharing
-system audio sends their voice back to them five times louder. Turning them *down* has the same
-shape in reverse. If you are sharing system audio, either untick it or leave the volumes at
-100%; the sliders are for listening, not for what you send.
+System audio sharing on Windows excludes Streamer's own playback using `restrictOwnAudio`.
+This requires the bundled Electron 43.4.0 or later ([runtime fix](https://releases.electronjs.org/pr/52455)).
+Play the film in another application so its audio is included. The microphone remains separate.
+Participant volume changes affect your playback; that playback is excluded from the shared mix.
+Older Streamer versions included the call in system capture; update the sharing participant's app.
+Headphones can reduce acoustic microphone echo, but do not remove digital loopback in old versions.
 
 **Choosing a speaker needs a permission.** `setSinkId` is gated behind Chromium's
 `speaker-selection` permission, which `desktop/main.js` grants for trusted origins alongside

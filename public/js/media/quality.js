@@ -449,6 +449,7 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
     get presetId() {
       return presetId;
     },
+    get uploadBudgetBps() { return uploadBudgetBps; },
     get preset() {
       return preset();
     },

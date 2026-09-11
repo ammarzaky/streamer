@@ -429,7 +429,48 @@ screen with a wrong "This room doesn't exist."
 
 ---
 
-## What this protocol does not do
+## Room chat extension
+
+The welcome payload advertises `chatEnabled: true`. Clients connected to an older host disable
+chat. The `chat` message is additive to protocol v1; old clients do not render incoming chat.
+
+Client to server: `chat` is legal only after joining, with `{ "text": "hello" }` and an optional
+envelope correlation `id`. Text must be nonblank and at most 2,000 UTF-16 code units. Extra
+payload keys (including sender names and destinations) are rejected.
+
+Server to client: `chat` carries `{ id, peerId, name, text, sentAt }`. The server assigns a unique
+message ID, timestamp, and the authenticated member's name/ID, trims the text, and relays it
+only inside that member's room. The sender receives the same message with `ref` matching the
+request ID: this confirms server acceptance, not that every participant has read it.
+
+Chat has a separate six-message burst allowance, refilling at two messages per second. Excess
+messages receive `RATE_LIMITED` without spending signaling/control tokens or dropping the call.
+No transcript is retained by the server or replayed to late joiners. Clients retain at most
+100 messages in page memory and clear them on reload or room exit. Chat uses WSS through the
+room server, rather than the peer-to-peer media channel; it is not included in diagnostics.
+
+## File data channel
+
+`room-files-v1` is a separate reliable, ordered WebRTC data channel created with the initial
+offer, alongside diagnostics. It is not a signaling message. Both sides send a JSON
+`{v:1,kind:"hello"}` before file controls are accepted, allowing older clients to remain in a call
+without being offered unsupported file transfers.
+
+Controls are JSON strings up to 2,048 characters: `offer` carries a UUID `id`, sanitized `name`,
+and integer `size` (0..104857600). `accept`, `cancel`, `end`, and `complete` carry the same `id`.
+There is one active outgoing and one active incoming transfer per peer. The receiver reserves
+memory and sends `accept` only after its user chooses Receive. Each binary chunk contains the
+36 ASCII bytes of the UUID, a 4-byte big-endian offset, then up to 12,288 payload bytes. Invalid
+offsets or an overrun cancel the transfer. Only an `end` after exactly `size` bytes creates a
+download, followed by `complete` confirming receipt to the sender. No automatic opening occurs.
+
+The upload pacer is shared across recipients; each data-channel buffer is bounded to about
+76 KB. Receive reservations plus completed downloads are capped at 200 MiB per page, and removing
+their chat cards releases memory and object URLs. A channel close, cancellation, or 180 seconds
+without progress ends incomplete transfers; reconnection does not resume them. Files never enter
+the signaling protocol, transcript persistence, or diagnostics dumps.
+
+## Other protocol limits
 
 Stated plainly so nobody looks for it:
 
