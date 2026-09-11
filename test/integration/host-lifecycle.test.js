@@ -163,7 +163,9 @@ test('ROOM_FULL is not returned because of a peer whose socket died silently', a
   // no-op and locks someone out of their own room until the heartbeat notices.
   const harness = await startHarness({
     rooms: { maxParticipants: 2, emptyRoomGraceMs: 60_000 },
-    signaling: { heartbeatTimeoutMs: 50 },
+    // Real TLS handshakes can take longer than 50ms under test load. Keep live peers
+    // alive and explicitly age only the peer whose silent loss is under test.
+    signaling: { heartbeatTimeoutMs: 30_000 },
   });
   t.after(() => harness.close());
 
@@ -183,7 +185,7 @@ test('ROOM_FULL is not returned because of a peer whose socket died silently', a
   // Now age the guest past the heartbeat timeout without touching its socket, which is what a
   // silent death looks like from the server's side.
   const guestPeer = room.peers.get(guestJoined.data.selfId);
-  guestPeer.lastSeen = Date.now() - 10_000;
+  guestPeer.lastSeen = Date.now() - 60_000;
 
   const returning = await join(harness, host.roomId, 'Guest');
   const joined = await returning.waitFor(S2C.JOINED);

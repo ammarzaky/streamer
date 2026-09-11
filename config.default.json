@@ -120,45 +120,16 @@
 
   "media": {
     "_presetComment": [
-      "The preset sets the CEILING -- resolution, frame rate, bitrate. How those bits are spent",
-      "is decided separately, from what the capture is actually doing, because a shared screen",
-      "is two different problems wearing one name.",
-      "",
-      "A code editor or a document is a still picture. A desktop capturer only emits frames that",
-      "CHANGED, so such a surface produces 1-3 fps whatever the preset asks for, and a 'motion'",
-      "hint then spends the whole bitrate protecting a frame rate nobody is producing -- paid",
-      "for in the one currency the viewer can see. Measured in the field: 1728x1080 arriving at",
-      "2 fps and 47 kbps, soft in every direction. Video or a game is the opposite.",
-      "",
-      "So the app watches media-source.framesPerSecond (the CAPTURER's rate, not the encoder's)",
-      "and switches contentHint between 'detail' and 'motion' with hysteresis. See",
-      "trackContentMode in public/shared/quality-math.js. That is why the default can stay at",
-      "the top of the ladder: it no longer forces one answer onto both kinds of content."
+      "Default to 1080p30 (3.5 Mbps video ceiling) for watch parties; 1080p60 remains selectable.",
+      "The controller adapts content hints from capture frame rate and lowers quality under sustained load."
     ],
-    "defaultPreset": "1080p60",
+    "defaultPreset": "1080p30",
     "autoAdapt": true,
 
     "_budgetComment": [
-      "Total outbound video budget, divided by the number of REMOTE peers you send to",
-      "(participants - 1), never by the participant count. At the default 4-participant cap",
-      "that is 20000/3 = 6.67 Mbps per peer, which is what makes the 1080p60 default (6 Mbps)",
-      "reachable. The two numbers were chosen together.",
-      "",
-      "20 Mbps is a LAN or fibre figure. On residential upstream -- often 1-5 Mbps -- it is",
-      "far above the real link, which makes the clamp inert exactly where it was meant to",
-      "help: the encoder saturates the uplink and takes the signaling socket and the audio",
-      "down with it until adaptation reacts. Two mitigations, both on by default: the lobby",
-      "exposes this as an editable 'Your upload speed', and bandwidth-triggered step-downs",
-      "use a shorter window than CPU-triggered ones so saturation is measured in seconds.",
-      "",
-      "Set it to your actual measured upload speed. It is the single most useful number to",
-      "get right in this file.",
-      "",
-      "The default is 10000 rather than 20000 because 20 Mbps was an aspiration, not a",
-      "measurement, and a budget above the real link is worse than no budget: it makes the",
-      "clamp inert precisely where it was supposed to help. 10 Mbps is a defensible figure",
-      "for ordinary home fibre, and it still leaves the whole budget to the single remote",
-      "peer in a two-person call -- enough for the 1080p60 default at 6 Mbps."
+      "Measured total upload speed. The controller reserves 15% for transport/retransmissions,",
+      "then reserves the configured mic and share-audio ceilings for each remote peer.",
+      "The remaining video budget is divided across remote peers. Set this to your measured upload speed."
     ],
     "uploadBudgetKbps": 10000,
 

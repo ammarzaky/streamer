@@ -22,8 +22,8 @@
  * `contentHint` is applied to the track; `degradationPreference` to the sender parameters.
  * For 60fps presets we keep the frame rate and let resolution fall, because shared motion
  * content (video, games, scrolling) degrades far more gracefully that way than into a
- * slideshow. The 30fps presets do the opposite: they are for reading text, where a sharp
- * still frame beats a smooth blurry one.
+ * slideshow. Lower-resolution 30fps presets favour text; 1080p30 also protects motion
+ * for movie playback. Measured still content overrides the hint below.
  */
 export const PRESETS = Object.freeze([
   {
@@ -62,20 +62,17 @@ export const PRESETS = Object.freeze([
   {
     id: '1080p30',
     label: '1080p 30',
-    note: 'Sharp text',
+    note: 'Movies / lower data',
     width: 1920,
     height: 1080,
     frameRate: 30,
     maxBitrateBps: 3_500_000,
-    contentHint: 'detail',
-    // 'balanced', not 'maintain-resolution', because this is the DEFAULT rung and a default
-    // must not have a cliff. Measured: three peers sharing a moving 1080p source with
-    // 'maintain-resolution' never decoded a frame inside 25 s -- the encoder refuses to scale
-    // down, so under three simultaneous encodes it starves the frame rate to nothing and the
-    // picture simply stops. 'balanced' lets it give up some resolution instead of freezing,
-    // and on the static screens this preset exists for there is no pressure to resolve either
-    // way. Someone who wants resolution held at any cost has 720p30 one rung down.
-    degradationPreference: 'balanced',
+    // Movies must not be treated as text: detail can drop most frames even at 30fps.
+    // https://www.w3.org/TR/mst-content-hint/#video-content-hints
+    contentHint: 'motion',
+    // Watch parties need smooth motion. Under pressure, scale before dropping frames.
+    // Measured still content switches back to detail/balanced below.
+    degradationPreference: 'maintain-framerate',
   },
   {
     id: '1080p60',
@@ -98,11 +95,18 @@ export const PRESET_IDS = Object.freeze(PRESETS.map((p) => p.id));
  * configured default is a difference nobody notices until one client is on a different rung
  * from the rest of the room.
  *
- * The top of the ladder, and it can be: the preset only sets the ceiling. Whether those bits go
- * into frame rate or into per-frame sharpness is decided from the capture itself -- see
- * `trackContentMode` below -- so this no longer forces a film's answer onto a code editor.
+ * Keep full-HD detail at 30fps for watch parties. 60fps remains available for sports and games.
  */
-export const DEFAULT_PRESET_ID = '1080p60';
+export const DEFAULT_PRESET_ID = '1080p30';
+
+/** Reserve transport/retransmission headroom and both audio tracks before allocating video.
+ * The positive floor keeps maxBitrate valid on extremely small upload budgets; such a link
+ * may still be unable to carry the audio alone.
+ */
+export function videoBudgetBps(uploadBps, participants, audioBps = 128_000) {
+  const peers = Math.max(1, participants - 1);
+  return Math.max(peers, Math.floor(uploadBps * 0.85) - audioBps * peers);
+}
 
 export function getPreset(id) {
   const preset = PRESETS.find((p) => p.id === id);

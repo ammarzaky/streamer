@@ -61,8 +61,8 @@ The settings most worth reviewing:
 ```json
 {
   "media": {
-    "uploadBudgetKbps": 20000,
-    "defaultPreset": "1080p60",
+    "uploadBudgetKbps": 10000,
+    "defaultPreset": "1080p30",
     "autoAdapt": true
   },
   "rooms": {

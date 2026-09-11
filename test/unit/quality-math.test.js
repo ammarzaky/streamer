@@ -50,20 +50,21 @@ test('every preset is fully specified', () => {
   }
 });
 
-test('60fps presets keep framerate, 30fps presets keep resolution', () => {
+test('motion presets keep framerate under pressure', () => {
   // Screen-shared motion content degrades better by dropping resolution than into a
   // slideshow; text content is the opposite. A preset that pairs these the wrong way round
   // looks like a WebRTC bug rather than a config mistake.
   for (const p of PRESETS) {
-    if (p.frameRate >= 60) assert.equal(p.degradationPreference, 'maintain-framerate', p.id);
+    if (p.contentHint === 'motion') assert.equal(p.degradationPreference, 'maintain-framerate', p.id);
   }
 });
 
-test('default preset is the top rung and matches media.defaultPreset in config.default.json', () => {
+test('default preset preserves full HD at 30fps and matches media.defaultPreset in config.default.json', () => {
   // The two must be the same string. A client falling back to a different rung from the one the
   // server configured is a difference nobody would ever notice.
   assert.ok(PRESET_IDS.includes(DEFAULT_PRESET_ID));
-  assert.equal(PRESETS.at(-1).id, DEFAULT_PRESET_ID);
+  assert.equal(getPreset(DEFAULT_PRESET_ID).height, 1080);
+  assert.equal(getPreset(DEFAULT_PRESET_ID).frameRate, 30);
   const config = JSON.parse(readFileSync(configPath, 'utf8'));
   assert.equal(config.media.defaultPreset, DEFAULT_PRESET_ID);
 });

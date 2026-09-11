@@ -89,7 +89,7 @@ otherwise.
 
 ## Quality
 
-The default target is **1080p at 60fps**, and the app adapts downward on its own when the
+The default target is **1080p at 30fps**, and the app adapts downward on its own when the
 network or the CPU cannot keep up. You can also pick a preset manually:
 
 | Preset | Bitrate ceiling | Good for |
@@ -97,8 +97,12 @@ network or the CPU cannot keep up. You can also pick a preset manually:
 | 480p 30 | 0.8 Mbps | A poor connection |
 | 720p 30 | 1.2 Mbps | Reading text, screenshares of documents |
 | 720p 60 | 3 Mbps | A balance |
-| 1080p 30 | 3.5 Mbps | Sharp text at full size |
-| **1080p 60** | **6 Mbps** | **Default** — the ceiling; how it is spent is decided below |
+| **1080p 30** | **3.5 Mbps** | **Default** — movies and full-HD detail with lower data use |
+| 1080p 60 | 6 Mbps | Sports, games, and other 60fps content |
+
+The default video ceiling is about 42% lower than the previous 6 Mbps ceiling. At the ceiling, video alone uses about 1.58 GB/hour per viewer instead of 2.7 GB/hour (decimal GB). Actual use varies with content; audio, transport, and retransmissions add traffic. 30fps preserves the resolution but is less smooth for 60fps sources. Existing `config.json` overrides still take precedence.
+
+Set **Your upload speed** to the measured upstream speed. The controller reserves 15% for transport/retransmissions and both audio ceilings per viewer before dividing the remaining video budget. This is headroom, not a guarantee against congestion.
 
 **The preset is a ceiling, not a style.** A shared screen is two different problems wearing one
 name. A code editor or a document is a *still* picture: a desktop capturer only emits frames
@@ -126,9 +130,10 @@ nothing about the picture on your screen.
 
 ### The one number worth correcting
 
-`media.uploadBudgetKbps` in `config.json` defaults to **20000** (20 Mbps), which is a LAN or
-fibre figure. It is divided by the number of people you are sending to, so at 4 participants
-each gets about 6.7 Mbps — which is what makes the 1080p60 default reachable.
+`media.uploadBudgetKbps` in `config.json` defaults to **10000** (10 Mbps). After reserving
+transport headroom and audio, the remaining video budget is divided by the number of viewers.
+At 4 participants the default allows about 2.71 Mbps of video per viewer; with one viewer,
+the full 3.5 Mbps default video ceiling fits.
 
 If your actual upload speed is lower, **set it to your real figure.** A budget far above your
 real uplink means the app happily saturates your connection before adapting, and a saturated
@@ -136,9 +141,8 @@ uplink takes the audio and the signaling connection down with it. This is the si
 useful value to get right.
 
 Bear in mind that when you share, you encode and upload a **separate copy for each other
-person**. With three other participants at 1080p60, that is roughly 18 Mbps upstream and three
-simultaneous encodes on your machine. On most laptops the CPU runs out before the network does,
-which is why automatic step-down is on by default.
+person**. Three viewers require three encodes and three copies of the video traffic. Both
+CPU and upload speed can limit quality, which is why automatic step-down is on by default.
 
 ---
 

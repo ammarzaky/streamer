@@ -48,10 +48,12 @@ test('taking over sharing actually stops the previous sender', async ({ browser 
   await expect.poll(async () => (await shareState(a)).sharerId, { timeout: 10_000 }).toBe(bId);
 
   // The decisive assertion: A's outbound video has actually stopped.
-  expect(
-    await isStillSendingVideo(a, bId),
-    'the previous sharer must stop transmitting, not merely lose the flag',
-  ).toBe(false);
+  // replaceTrack(null) stops new frames immediately, but queued RTP/retransmissions
+  // may still drain. Require a quiet measurement window within a bounded deadline.
+  await expect.poll(() => isStillSendingVideo(a, bId), {
+    timeout: 15_000,
+    message: 'the previous sharer must stop transmitting, not merely lose the flag',
+  }).toBe(false);
 
   // A's video sender still exists (the transceiver is reused) but carries no track.
   const aSenders = await senders(a, bId);

@@ -27,6 +27,7 @@ import {
   effectiveCapBps,
   scaleResolutionDownBy,
   isBandwidthGenuinelyShort,
+  videoBudgetBps,
 } from '../../shared/quality-math.js';
 import { logger } from '../core/logger.js';
 
@@ -43,7 +44,7 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
   // The constant, not a second copy of the literal: this fallback drifting from the exported
   // one is the same class of bug as it drifting from config.default.json.
   let presetId = media.defaultPreset ?? DEFAULT_PRESET_ID;
-  let uploadBudgetBps = (media.uploadBudgetKbps ?? 20000) * 1000;
+  let uploadBudgetBps = (media.uploadBudgetKbps ?? 10000) * 1000;
   const autoAdapt = media.autoAdapt !== false;
 
   /** What the capture is actually producing. The scale factor is derived from this, not from
@@ -72,14 +73,21 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
   const cpuThreshold = media.stepDownSamplesCpu ?? 8;
   const bandwidthThreshold = media.stepDownSamplesBandwidth ?? 6;
   const cooldownMs = media.adaptCooldownMs ?? 10_000;
-  const warmupMs = media.adaptWarmupMs ?? 8000;
+  const warmupMs = media.adaptWarmupMs ?? 15000;
+  let adaptationReason = LIMITED_BY.NONE;
+
+  function videoBudget() {
+    const audio = media.audio ?? {};
+    return videoBudgetBps(uploadBudgetBps, mesh.participantCount(),
+      (audio.micMaxBitrateBps ?? 32_000) + (audio.shareAudioMaxBitrateBps ?? 96_000));
+  }
 
   function preset() {
     return getPreset(presetId);
   }
 
   function perPeerCap() {
-    return effectiveCapBps(preset().maxBitrateBps, uploadBudgetBps, mesh.participantCount());
+    return effectiveCapBps(preset().maxBitrateBps, videoBudget(), mesh.participantCount());
   }
 
   // -------------------------------------------------------------------------
@@ -115,7 +123,8 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
     encoding.active = true;
     encoding.maxBitrate = capBps;
     encoding.maxFramerate = p.frameRate;
-    encoding.scaleResolutionDownBy = scaleResolutionDownBy(captureHeight, p.height);
+    encoding.scaleResolutionDownBy = scaleResolutionDownBy(
+      sender.track.getSettings?.().height ?? captureHeight, p.height);
     encoding.networkPriority = 'high';
     encoding.priority = 'high';
 
@@ -184,7 +193,7 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
       presetId,
       effectiveCapBps: cap,
       contentMode,
-      limitedBy: limited ? LIMITED_BY.MESH_BUDGET : LIMITED_BY.NONE,
+      limitedBy: limited ? LIMITED_BY.MESH_BUDGET : adaptationReason,
     });
   }
 
@@ -208,6 +217,7 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
     if (id === presetId) return false;
     getPreset(id); // throws on an unknown id rather than silently doing nothing
     presetId = id;
+    adaptationReason = LIMITED_BY.NONE;
     lastChangeAt = performance.now();
     resetCounters();
     // The hint belongs to the preset, so it moves with it.
@@ -278,6 +288,7 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
   }
 
   function setUploadBudgetKbps(kbps) {
+    if (!Number.isFinite(kbps) || kbps <= 0) return;
     uploadBudgetBps = Math.max(100, kbps) * 1000;
     void apply();
   }
@@ -303,7 +314,8 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
    * collapses is worse than staying put.
    */
   function observe(samples) {
-    if (samples.length === 0) return;
+    if (!localVideoTrack || samples.length === 0) return;
+    setCaptureHeight(localVideoTrack.getSettings?.().height);
 
     // Outside the `autoAdapt` switch and the cooldown: this is not a downgrade, it is the
     // encoder being told what it is looking at, and someone who has turned automatic quality
@@ -351,6 +363,7 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
   }
 
   function stepDownNow(reason, evidence = {}) {
+    adaptationReason = reason;
     const next = stepDown(presetId);
     if (next.id === presetId) {
       // Already at the floor. Report the constraint rather than pretending it is fine.
@@ -360,6 +373,7 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
 
     logger.info('quality: stepping down', { from: presetId, to: next.id, reason, ...evidence });
     presetId = next.id;
+    applyContentHint(localVideoTrack);
     lastChangeAt = performance.now();
     resetCounters();
     void apply();
@@ -384,8 +398,12 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
   function maybeSuggestRaise(samples) {
     if (presetIndex(presetId) >= PRESETS.length - 1) return;
 
-    const share = Math.floor(uploadBudgetBps / Math.max(1, mesh.participantCount() - 1));
+    const share = Math.floor(videoBudget() / Math.max(1, mesh.participantCount() - 1));
     const next = stepUp(presetId);
+    if (next.maxBitrateBps > share) {
+      goodSamples = 0;
+      return;
+    }
 
     const allHealthy = samples.every(
       (s) =>
@@ -405,6 +423,8 @@ export function createQualityController({ config, mesh, onChange, onSuggestRaise
   /** Called whenever the outgoing video track changes, including when it is cleared. */
   function setLocalVideoTrack(track) {
     localVideoTrack = track ?? null;
+    captureHeight = track?.getSettings?.().height ?? null;
+    adaptationReason = LIMITED_BY.NONE;
     // A new capture is a new question. Carrying "that was a still picture" from the window that
     // was just stopped into a film that was just started is worse than having no answer at all,
     // so the measurement restarts with the track.

@@ -8,6 +8,7 @@ import {
   inboundVideo,
   outboundVideo,
   encodings,
+  stats,
 } from './helpers/app.js';
 import { DEFAULT_PRESET_ID, getPreset } from '../../public/shared/quality-math.js';
 
@@ -70,7 +71,7 @@ test('the stats panel reports live bitrate, frames, resolution and connection ty
   await guestCtx.close();
 });
 
-test('a healthy connection keeps the 60fps preset instead of quietly halving it', async ({
+test('a healthy connection keeps the selected preset through encoder warmup', async ({
   browser,
 }) => {
   // The regression: for roughly the first twelve seconds of any share the encoder ramps
@@ -157,21 +158,31 @@ test('a healthy connection keeps the 60fps preset instead of quietly halving it'
     const contentMode = await host.evaluate(() => window.__app.quality().contentMode);
     expect(contentMode, 'a 60fps canvas must not be read as a still picture').not.toBe('still');
 
-    const rateOver = async (read, field, ms) => {
-      const first = await read();
-      await host.waitForTimeout(ms);
-      const second = await read();
-      return ((second[field] - first[field]) / ms) * 1000;
+    const readFrames = async () => {
+      const reports = await stats(host, guestId);
+      return {
+        encoded: reports.find((s) => s.type === 'outbound-rtp' && s.kind === 'video')?.framesEncoded,
+        captured: reports.find((s) => s.type === 'media-source' && s.kind === 'video')?.frames,
+        at: performance.now(),
+      };
     };
-    const fps = await rateOver(() => outboundVideo(host, guestId), 'framesEncoded', 4000);
-    const where = `${fps.toFixed(1)} fps at the ${defaultPreset.label} default`;
+    const first = await readFrames();
+    await host.waitForTimeout(4000);
+    const second = await readFrames();
+    const seconds = (second.at - first.at) / 1000;
+    const fps = (second.encoded - first.encoded) / seconds;
+    const sourceFps = (second.captured - first.captured) / seconds;
+    expect(sourceFps, 'the synthetic source must actually produce frames').toBeGreaterThan(0);
+    const where = `${fps.toFixed(1)} encoded fps from ${sourceFps.toFixed(1)} captured fps at ${defaultPreset.label}`;
 
     // Assert what THIS preset promises, because the two families promise opposite things and
     // a single frame-rate floor is only meaningful for one of them.
     if (defaultPreset.contentHint === 'motion') {
       // 'motion' + maintain-framerate: frames are the thing being protected, so a rate near the
       // neighbouring rung's would mean the encoder was quietly capped.
-      expect(fps, where).toBeGreaterThan(defaultPreset.frameRate * 0.6);
+      // requestAnimationFrame is best-effort on a loaded machine. The encoder cannot send
+      // frames the canvas never produced; compare simultaneous source/output counters.
+      expect(fps, where).toBeGreaterThan(Math.min(defaultPreset.frameRate, sourceFps) * 0.6);
     } else {
       // 'detail': the encoder is EXPECTED to spend frame rate on picture quality -- measured at
       // ~6 fps here from a moving synthetic source, by design. What must hold is the promise it
